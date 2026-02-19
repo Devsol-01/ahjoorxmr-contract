@@ -1,18 +1,27 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Vec};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum PayoutStrategy {
+    RoundRobin = 0,
+    AdminAssigned = 1,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
     Admin,           // Address
     Members,         // Vec<Address>
+    PayoutOrder,     // Vec<Address>
+    Strategy,        // PayoutStrategy
     ContributionAmt, // i128
     Token,           // Address
     CurrentRound,    // u32
     PaidMembers,     // Vec<Address>
     RoundDuration,   // u64
     RoundDeadline,   // u64
-    Defaulters,      // Vec<Address> for the most recent closed round
+    Defaulters,      // Vec<Address>
 }
 
 #[contract]
@@ -20,7 +29,6 @@ pub struct AhjoorContract;
 
 #[contractimpl]
 impl AhjoorContract {
-    /// Initializes the contract with members, contribution rules, and timing.
     pub fn init(
         env: Env,
         admin: Address,
@@ -28,10 +36,36 @@ impl AhjoorContract {
         contribution_amount: i128,
         token: Address,
         round_duration: u64,
+        strategy: PayoutStrategy,
+        custom_order: Option<Vec<Address>>,
     ) {
         if env.storage().instance().has(&DataKey::Members) {
             panic!("Already initialized");
         }
+
+        // Determine the payout order based on strategy
+        let resolved_order = match strategy {
+            PayoutStrategy::RoundRobin => members.clone(),
+            PayoutStrategy::AdminAssigned => {
+                let order = custom_order.expect("AdminAssigned strategy requires a custom order");
+
+                // Validation 1: Length must match
+                if order.len() != members.len() {
+                    panic!("Custom order length mismatch");
+                }
+
+                // Validation 2: Ensure every member is present exactly once
+                for member in order.iter() {
+                    if !members.contains(&member) {
+                        panic!("Custom order contains non-member address");
+                    }
+                }
+
+                // Note: Soroban Vecs don't have a built-in 'dedup', but since length
+                // matches and all are members, presence of all implies no duplicates.
+                order
+            }
+        };
 
         let start_time = env.ledger().timestamp();
         let deadline = start_time + round_duration;
@@ -40,14 +74,16 @@ impl AhjoorContract {
         env.storage().instance().set(&DataKey::Members, &members);
         env.storage()
             .instance()
+            .set(&DataKey::PayoutOrder, &resolved_order);
+        env.storage().instance().set(&DataKey::Strategy, &strategy);
+        env.storage()
+            .instance()
             .set(&DataKey::ContributionAmt, &contribution_amount);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::CurrentRound, &0u32);
         env.storage()
             .instance()
             .set(&DataKey::PaidMembers, &Vec::<Address>::new(&env));
-
-        // Time-lock parameters
         env.storage()
             .instance()
             .set(&DataKey::RoundDuration, &round_duration);
@@ -62,7 +98,6 @@ impl AhjoorContract {
     pub fn contribute(env: Env, contributor: Address) {
         contributor.require_auth();
 
-        // 1. Check Deadline Enforcement
         let deadline: u64 = env
             .storage()
             .instance()
@@ -72,7 +107,6 @@ impl AhjoorContract {
             panic!("Contribution failed: Round deadline has passed");
         }
 
-        // 2. Check if member
         let members: Vec<Address> = env
             .storage()
             .instance()
@@ -82,7 +116,6 @@ impl AhjoorContract {
             panic!("Not a member");
         }
 
-        // 3. Check if already paid for this round
         let mut paid_members: Vec<Address> = env
             .storage()
             .instance()
@@ -92,7 +125,6 @@ impl AhjoorContract {
             panic!("Already contributed for this round");
         }
 
-        // 4. Transfer funds
         let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let client = token::Client::new(&env, &token_addr);
         let amount: i128 = env
@@ -103,19 +135,16 @@ impl AhjoorContract {
 
         client.transfer(&contributor, &env.current_contract_address(), &amount);
 
-        // 5. Mark as paid
         paid_members.push_back(contributor.clone());
         env.storage()
             .instance()
             .set(&DataKey::PaidMembers, &paid_members);
 
-        // 6. Check if round is complete (Auto-payout if everyone paid before deadline)
         if paid_members.len() == members.len() {
-            Self::complete_round_payout(&env, &members, &paid_members, amount, client);
+            Self::complete_round_payout(&env, &paid_members, amount, client);
         }
     }
 
-    /// Admin-only function to force-close an expired round and track defaulters.
     pub fn close_round(env: Env) {
         let admin: Address = env
             .storage()
@@ -137,7 +166,6 @@ impl AhjoorContract {
         let paid_members: Vec<Address> =
             env.storage().instance().get(&DataKey::PaidMembers).unwrap();
 
-        // Identify and store defaulters
         let mut defaulters = Vec::new(&env);
         for member in members.iter() {
             if !paid_members.contains(&member) {
@@ -148,7 +176,6 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::Defaulters, &defaulters);
 
-        // Advance to next round state
         let current_round: u32 = env
             .storage()
             .instance()
@@ -171,16 +198,12 @@ impl AhjoorContract {
             &(env.ledger().timestamp() + duration),
         );
 
-        // Emit event for transparency
         env.events()
             .publish((symbol_short!("closed"), current_round), defaulters);
     }
 
-    // --- Internal Helper ---
-
     fn complete_round_payout(
         env: &Env,
-        members: &Vec<Address>,
         paid_members: &Vec<Address>,
         amount: i128,
         client: token::Client,
@@ -190,10 +213,12 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap();
+        let payout_order: Vec<Address> =
+            env.storage().instance().get(&DataKey::PayoutOrder).unwrap();
 
-        // Payout to current recipient (round-robin)
-        let recipient_idx = current_round % members.len();
-        let payout_recipient = members.get(recipient_idx).unwrap();
+        // Payout based on the resolved PayoutOrder (regardless of strategy)
+        let recipient_idx = current_round % payout_order.len();
+        let payout_recipient = payout_order.get(recipient_idx).unwrap();
 
         let total_pot = amount * (paid_members.len() as i128);
         client.transfer(
@@ -202,7 +227,6 @@ impl AhjoorContract {
             &total_pot,
         );
 
-        // Reset for next round
         let duration: u64 = env
             .storage()
             .instance()
@@ -220,7 +244,7 @@ impl AhjoorContract {
         );
     }
 
-    pub fn get_state(env: Env) -> (u32, Vec<Address>, u64) {
+    pub fn get_state(env: Env) -> (u32, Vec<Address>, u64, PayoutStrategy) {
         let current_round: u32 = env
             .storage()
             .instance()
@@ -236,8 +260,13 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::RoundDeadline)
             .unwrap_or(0);
-        (current_round, paid_members, deadline)
+        let strategy: PayoutStrategy = env
+            .storage()
+            .instance()
+            .get(&DataKey::Strategy)
+            .unwrap_or(PayoutStrategy::RoundRobin);
+
+        (current_round, paid_members, deadline, strategy)
     }
 }
-
 mod test;

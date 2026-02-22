@@ -2490,7 +2490,7 @@ fn test_collective_savings_goal() {
     setup.token_admin_client.mint(&u2, &1000);
 
     // 1st contribution (25%)
-    setup.client.contribute(&u1);
+    setup.client.contribute(&u1, &setup.token_admin);
     
     let events = setup.env.events().all();
     let last_event = events.last().unwrap();
@@ -2500,7 +2500,7 @@ fn test_collective_savings_goal() {
     assert_eq!(milestone_data_1, 100i128);
 
     // 2nd contribution (50%)
-    setup.client.contribute(&u2);
+    setup.client.contribute(&u2, &setup.token_admin);
     let events = setup.env.events().all();
     let last_event = events.last().unwrap();
     // Milestone 50 reached
@@ -2542,7 +2542,7 @@ fn test_individual_member_goals() {
     setup.token_admin_client.mint(&u1, &1000);
 
     // Round 0
-    setup.client.contribute(&u1);
+    setup.client.contribute(&u1, &setup.token_admin);
     let (total, _, m_done, m_goal) = setup.client.get_savings_progress(&Some(u1.clone()));
     assert_eq!(total, 100i128);
     assert_eq!(m_done, 100i128);
@@ -2551,7 +2551,7 @@ fn test_individual_member_goals() {
     // Round 1
     setup.env.ledger().set_timestamp(4000);
     setup.client.close_round();
-    setup.client.contribute(&u1);
+    setup.client.contribute(&u1, &setup.token_admin);
     
     let (_, _, m_done, _) = setup.client.get_savings_progress(&Some(u1.clone()));
     assert_eq!(m_done, 200i128);
@@ -2572,10 +2572,14 @@ fn test_contribution_with_alternate_token() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
     
     // Create an alternate token (e.g. USDC)
@@ -2613,10 +2617,14 @@ fn test_token_limit_violation() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
     
     // Set limit for base token to 50 (below contribution amount of 100)
@@ -2641,10 +2649,14 @@ fn test_unapproved_multi_token_rejection() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
     
     let alt_token = Address::generate(&setup.env);
@@ -2664,10 +2676,14 @@ fn test_multi_token_payout_accumulation() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
     
     let alt_token_admin_addr = setup.env.register_stellar_asset_contract_v2(setup.admin.clone()).address();
@@ -2689,3 +2705,500 @@ fn test_multi_token_payout_accumulation() {
     assert_eq!(setup.token_client.balance(&user1), 1000); // 1000 - 100 + 100 (base)
     assert_eq!(alt_token_client.balance(&user1), 100); // 0 + 100 (alt)
 }
+
+// --- GOVERNANCE TESTS ---
+
+#[test]
+fn test_create_proposal() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Remove inactive member");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    assert_eq!(setup.client.get_proposal_counter(), 1);
+    
+    let proposal = setup.client.get_proposal(&0);
+    assert!(proposal.is_some());
+    let prop = proposal.unwrap();
+    assert_eq!(prop.id, 0);
+    assert_eq!(prop.votes_for, 0);
+    assert_eq!(prop.votes_against, 0);
+}
+
+#[test]
+fn test_vote_on_proposal() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Penalty appeal");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::PenaltyAppeal,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user2, &0, &true);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.votes_for, 2);
+    assert_eq!(proposal.votes_against, 0);
+}
+
+#[test]
+fn test_execute_proposal_with_quorum() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Update rules");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::RuleChange,
+        &description,
+        &user1,
+        &3600,
+        &Some(75),
+    );
+    
+    // All members vote for the proposal
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user2, &0, &true);
+    setup.client.vote_on_proposal(&user3, &0, &true);
+    
+    // Fast forward past deadline
+    setup.env.ledger().set_timestamp(3601);
+    
+    // Execute the proposal
+    setup.client.execute_proposal(&0);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+    assert_eq!(setup.client.get_quorum_percentage(), 75);
+}
+
+#[test]
+fn test_proposal_insufficient_quorum() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    // Only one member votes (not enough for quorum of 51%)
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    
+    // Fast forward past deadline
+    setup.env.ledger().set_timestamp(3601);
+    
+    // Try to execute - should be rejected due to insufficient quorum
+    setup.client.execute_proposal(&0);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+}
+
+#[test]
+fn test_proposal_voted_down() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Member removal");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    // Votes against
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user2, &0, &false);
+    setup.client.vote_on_proposal(&user3, &0, &false);
+    
+    // Fast forward past deadline
+    setup.env.ledger().set_timestamp(3601);
+    
+    setup.client.execute_proposal(&0);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+}
+
+#[test]
+fn test_penalty_appeal_execution() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    // Penalize user2
+    setup.env.ledger().set_timestamp(100);
+    setup.client.contribute(&user1, &setup.token_admin);
+    setup.client.contribute(&user3, &setup.token_admin);
+    
+    setup.env.ledger().set_timestamp(3601);
+    setup.client.close_round();
+    
+    setup.client.penalise_defaulter(&user2);
+    
+    // Create penalty appeal proposal at timestamp 3601
+    let description = soroban_sdk::String::from_str(&setup.env, "Appeal penalty");
+    setup.client.create_proposal(
+        &user2,
+        &ProposalType::PenaltyAppeal,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    // All vote for appeal
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user2, &0, &true);
+    setup.client.vote_on_proposal(&user3, &0, &true);
+    
+    // Fast forward past voting deadline (3601 + 3600 + 1)
+    setup.env.ledger().set_timestamp(7202);
+    setup.client.execute_proposal(&0);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+}
+
+#[test]
+fn test_member_removal_execution() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Remove member");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user2, &0, &true);
+    setup.client.vote_on_proposal(&user3, &0, &true);
+    
+    setup.env.ledger().set_timestamp(3601);
+    setup.client.execute_proposal(&0);
+    
+    let proposal = setup.client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Executed);
+    
+    let group_info = setup.client.get_group_info();
+    assert!(!group_info.members.contains(&user2));
+}
+
+#[test]
+#[should_panic(expected = "Only members can create proposals")]
+fn test_non_member_cannot_create_proposal() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let non_member = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Unauthorized proposal");
+    setup.client.create_proposal(
+        &non_member,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Voting deadline has passed")]
+fn test_cannot_vote_after_deadline() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    setup.env.ledger().set_timestamp(100);
+    let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    // Deadline is at 100 + 3600 = 3700, try to vote at 3701
+    setup.env.ledger().set_timestamp(3701);
+    setup.client.vote_on_proposal(&user1, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "Member has already voted on this proposal")]
+fn test_cannot_vote_twice() {
+    let setup = setup_env();
+    let user1 = Address::generate(&setup.env);
+    let user2 = Address::generate(&setup.env);
+    let user3 = Address::generate(&setup.env);
+    let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
+    
+    setup.token_admin_client.mint(&user1, &1000);
+    setup.token_admin_client.mint(&user2, &1000);
+    setup.token_admin_client.mint(&user3, &1000);
+    
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100,
+        &setup.token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: 1000,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+    
+    let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
+    setup.client.create_proposal(
+        &user1,
+        &ProposalType::MemberRemoval,
+        &description,
+        &user2,
+        &3600,
+        &None,
+    );
+    
+    setup.client.vote_on_proposal(&user1, &0, &true);
+    setup.client.vote_on_proposal(&user1, &0, &false);
+}
+

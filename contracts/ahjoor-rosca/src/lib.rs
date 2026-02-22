@@ -146,6 +146,20 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ContributionAmt, &contribution_amount);
         env.storage().instance().set(&DataKey::Token, &token);
+
+        // Auto-approve the base token
+        let mut approved_tokens: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ApprovedTokens)
+            .unwrap_or(Vec::new(&env));
+        if !approved_tokens.contains(&token) {
+            approved_tokens.push_back(token.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::ApprovedTokens, &approved_tokens);
+        }
+
         env.storage().instance().set(&DataKey::CurrentRound, &0u32);
         env.storage()
             .instance()

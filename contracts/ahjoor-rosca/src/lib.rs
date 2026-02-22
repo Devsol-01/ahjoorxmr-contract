@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec,
 };
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 100_000;

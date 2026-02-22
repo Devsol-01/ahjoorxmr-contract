@@ -61,6 +61,39 @@ pub struct ExitRequest {
     pub approved: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum ProposalType {
+    PenaltyAppeal = 0,
+    RuleChange = 1,
+    MemberRemoval = 2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum ProposalStatus {
+    Pending = 0,
+    Approved = 1,
+    Rejected = 2,
+    Executed = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Proposal {
+    pub id: u32,
+    pub proposal_type: ProposalType,
+    pub creator: Address,
+    pub description: soroban_sdk::String,
+    pub target_member: Address,
+    pub votes_for: u32,
+    pub votes_against: u32,
+    pub created_at: u64,
+    pub deadline: u64,
+    pub status: ProposalStatus,
+    pub execution_data: Option<i128>,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
@@ -99,6 +132,11 @@ pub enum DataKey {
     MilestonesReached,   // Vec<u32> (e.g. 25, 50, 75, 100)
     ExchangeRates,       // Map<Address, i128>
     TokenLimits,         // Map<Address, i128>
+    ProposalCounter,     // u32
+    Proposals,           // Map<u32, Proposal>
+    ProposalVotes,       // Map<u32, Map<Address, bool>> (proposal_id -> member_address -> has_voted)
+    VotingDeadline,      // u64
+    QuorumPercentage,    // u32 (e.g., 51 for 51%)
 }
 
 #[contract]
@@ -242,6 +280,22 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::MilestonesReached, &Vec::<u32>::new(&env));
+
+        // Governance Initialization
+        env.storage().instance().set(&DataKey::ProposalCounter, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &Map::<u32, Proposal>::new(&env));
+        env.storage().instance().set(
+            &DataKey::ProposalVotes,
+            &Map::<u32, Map<Address, bool>>::new(&env),
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::VotingDeadline, &0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumPercentage, &51u32);
 
         env.events().publish(
             (symbol_short!("init"),),
@@ -922,6 +976,334 @@ impl AhjoorContract {
         share - already_claimed
     }
 
+    // --- GOVERNANCE FUNCTIONS ---
+
+    pub fn create_proposal(
+        env: Env,
+        creator: Address,
+        proposal_type: ProposalType,
+        description: soroban_sdk::String,
+        target_member: Address,
+        voting_duration: u64,
+        execution_data: Option<i128>,
+    ) {
+        Self::check_not_paused(&env);
+        creator.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&creator) {
+            panic!("Only members can create proposals");
+        }
+
+        let current_time = env.ledger().timestamp();
+        let deadline = current_time + voting_duration;
+
+        let mut proposal_counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalCounter)
+            .unwrap_or(0);
+        let proposal_id = proposal_counter;
+        proposal_counter += 1;
+
+        let proposal = Proposal {
+            id: proposal_id,
+            proposal_type,
+            creator: creator.clone(),
+            description,
+            target_member: target_member.clone(),
+            votes_for: 0,
+            votes_against: 0,
+            created_at: current_time,
+            deadline,
+            status: ProposalStatus::Pending,
+            execution_data,
+        };
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        proposals.set(proposal_id, proposal.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &proposals);
+
+        let mut proposal_votes: Map<u32, Map<Address, bool>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalVotes)
+            .unwrap_or(Map::new(&env));
+        proposal_votes.set(proposal_id, Map::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalVotes, &proposal_votes);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalCounter, &proposal_counter);
+
+        env.events().publish(
+            (symbol_short!("prop_new"), proposal_id),
+            (
+                creator,
+                target_member,
+                current_time,
+                deadline,
+            ),
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn vote_on_proposal(env: Env, voter: Address, proposal_id: u32, vote_for: bool) {
+        Self::check_not_paused(&env);
+        voter.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&voter) {
+            panic!("Only members can vote");
+        }
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        if !proposals.contains_key(proposal_id) {
+            panic!("Proposal does not exist");
+        }
+
+        let mut proposal = proposals.get(proposal_id).unwrap();
+        let current_time = env.ledger().timestamp();
+        if current_time > proposal.deadline {
+            panic!("Voting deadline has passed");
+        }
+        if proposal.status != ProposalStatus::Pending {
+            panic!("Proposal is not pending");
+        }
+
+        let mut proposal_votes: Map<u32, Map<Address, bool>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalVotes)
+            .unwrap_or(Map::new(&env));
+        let mut votes = proposal_votes.get(proposal_id).unwrap_or(Map::new(&env));
+
+        if votes.contains_key(voter.clone()) {
+            panic!("Member has already voted on this proposal");
+        }
+
+        votes.set(voter.clone(), vote_for);
+        proposal_votes.set(proposal_id, votes);
+
+        if vote_for {
+            proposal.votes_for += 1;
+        } else {
+            proposal.votes_against += 1;
+        }
+
+        proposals.set(proposal_id, proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &proposals);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalVotes, &proposal_votes);
+
+        env.events().publish(
+            (symbol_short!("voted"), proposal_id, voter),
+            vote_for,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn execute_proposal(env: Env, proposal_id: u32) {
+        Self::check_not_paused(&env);
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        if !proposals.contains_key(proposal_id) {
+            panic!("Proposal does not exist");
+        }
+
+        let mut proposal = proposals.get(proposal_id).unwrap();
+        let current_time = env.ledger().timestamp();
+
+        if proposal.status != ProposalStatus::Pending {
+            panic!("Proposal is not pending");
+        }
+
+        if current_time <= proposal.deadline {
+            panic!("Voting period has not ended");
+        }
+
+        let total_votes = proposal.votes_for + proposal.votes_against;
+        let quorum_percentage: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumPercentage)
+            .unwrap_or(51);
+
+        let required_votes = ((members.len() as u32 * quorum_percentage) + 99) / 100;
+
+        if total_votes < required_votes {
+            proposal.status = ProposalStatus::Rejected;
+            proposals.set(proposal_id, proposal.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::Proposals, &proposals);
+            env.events().publish(
+                (symbol_short!("prop_rej"), proposal_id),
+                ("insufficient_quorum", total_votes, required_votes),
+            );
+            return;
+        }
+
+        if proposal.votes_for <= proposal.votes_against {
+            proposal.status = ProposalStatus::Rejected;
+            proposals.set(proposal_id, proposal.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::Proposals, &proposals);
+            env.events().publish(
+                (symbol_short!("prop_rej"), proposal_id),
+                ("votes_failed", proposal.votes_for, proposal.votes_against),
+            );
+            return;
+        }
+
+        proposal.status = ProposalStatus::Approved;
+
+        match proposal.proposal_type {
+            ProposalType::PenaltyAppeal => {
+                Self::execute_penalty_appeal(&env, &proposal.target_member);
+            }
+            ProposalType::RuleChange => {
+                Self::execute_rule_change(&env, proposal.execution_data);
+            }
+            ProposalType::MemberRemoval => {
+                Self::execute_member_removal(&env, &proposal.target_member);
+            }
+        }
+
+        proposal.status = ProposalStatus::Executed;
+        proposals.set(proposal_id, proposal.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposals, &proposals);
+
+        env.events().publish(
+            (symbol_short!("prop_exec"), proposal_id),
+            (proposal.proposal_type as u32, proposal.target_member.clone()),
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    fn execute_penalty_appeal(env: &Env, member: &Address) {
+        let mut default_count: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultCount)
+            .unwrap_or(Map::new(env));
+
+        default_count.set(member.clone(), 0);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultCount, &default_count);
+
+        let suspended_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuspendedMembers)
+            .unwrap_or(Vec::new(env));
+        let mut new_suspended = Vec::new(env);
+        for m in suspended_members.iter() {
+            if m != *member {
+                new_suspended.push_back(m);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SuspendedMembers, &new_suspended);
+
+        env.events()
+            .publish((symbol_short!("appeal_ok"), member.clone()), ());
+    }
+
+    fn execute_rule_change(env: &Env, new_quorum: Option<i128>) {
+        if let Some(quorum) = new_quorum {
+            if quorum >= 1 && quorum <= 100 {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::QuorumPercentage, &(quorum as u32));
+                env.events()
+                    .publish((symbol_short!("rule_upd"),), quorum);
+            }
+        }
+    }
+
+    fn execute_member_removal(env: &Env, member: &Address) {
+        let old_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(env));
+        let mut new_members: Vec<Address> = Vec::new(env);
+        for m in old_members.iter() {
+            if m != *member {
+                new_members.push_back(m);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Members, &new_members);
+
+        let old_order: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PayoutOrder)
+            .unwrap_or(Vec::new(env));
+        let mut new_order: Vec<Address> = Vec::new(env);
+        for m in old_order.iter() {
+            if m != *member {
+                new_order.push_back(m);
+            }
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PayoutOrder, &new_order);
+
+        env.events()
+            .publish((symbol_short!("mem_del"), member.clone()), ());
+    }
+
     // --- READ INTERFACE ---
 
     pub fn get_group_info(env: Env) -> GroupInfo {
@@ -1054,6 +1436,42 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::ApprovedTokens)
             .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_proposal(env: Env, proposal_id: u32) -> Option<Proposal> {
+        let proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        proposals.get(proposal_id)
+    }
+
+    pub fn get_proposal_counter(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ProposalCounter)
+            .unwrap_or(0)
+    }
+
+    pub fn get_member_vote(env: Env, proposal_id: u32, member: Address) -> bool {
+        let proposal_votes: Map<u32, Map<Address, bool>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalVotes)
+            .unwrap_or(Map::new(&env));
+        if let Some(votes) = proposal_votes.get(proposal_id) {
+            votes.get(member).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    pub fn get_quorum_percentage(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::QuorumPercentage)
+            .unwrap_or(51)
     }
 
     // --- EMERGENCY EXIT ---

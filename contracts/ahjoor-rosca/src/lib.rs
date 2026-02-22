@@ -900,6 +900,27 @@ impl AhjoorContract {
         (current_round, paid_members, deadline, strategy, token)
     }
 
+    pub fn get_exchange_rates(env: Env) -> Map<Address, i128> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ExchangeRates)
+            .unwrap_or(Map::new(&env))
+    }
+
+    pub fn get_token_limits(env: Env) -> Map<Address, i128> {
+        env.storage()
+            .instance()
+            .get(&DataKey::TokenLimits)
+            .unwrap_or(Map::new(&env))
+    }
+
+    pub fn get_approved_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::ApprovedTokens)
+            .unwrap_or(Vec::new(&env))
+    }
+
     // --- EMERGENCY EXIT ---
 
     pub fn pause_group(env: Env, reason: soroban_sdk::String) {

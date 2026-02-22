@@ -73,10 +73,14 @@ fn test_rosca_flow_with_time_locks() {
         &amount,
         &token_admin,
         &duration,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
 
     env.ledger().set_timestamp(100);
@@ -116,10 +120,15 @@ fn test_cannot_close_early() {
         &100,
         &Address::generate(&env),
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     env.ledger().set_timestamp(500);
@@ -152,10 +161,15 @@ fn test_on_time_contribution() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     env.ledger().set_timestamp(1000);
@@ -188,10 +202,15 @@ fn test_late_contribution_rejection() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -218,10 +237,15 @@ fn test_admin_close_round() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -262,10 +286,15 @@ fn test_admin_assigned_strategy_execution() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::AdminAssigned,
-        &Some(custom_order),
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::AdminAssigned,
+            custom_order: Some(custom_order),
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     client.contribute(&user1);
@@ -294,10 +323,15 @@ fn test_invalid_admin_order_validation() {
         &100,
         &Address::generate(&env),
         &3600,
-        &PayoutStrategy::AdminAssigned,
-        &Some(bad_order),
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::AdminAssigned,
+            custom_order: Some(bad_order),
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 }
 
@@ -332,10 +366,15 @@ fn test_round_robin_e2e_all_rounds() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // ROUND 0: u1 should get the payout
@@ -381,10 +420,15 @@ fn test_admin_assigned_e2e_all_rounds() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::AdminAssigned,
-        &Some(custom_order),
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::AdminAssigned,
+            custom_order: Some(custom_order),
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // ROUND 0: u2 should get the payout first
@@ -427,10 +471,15 @@ fn test_verify_contract_events() {
         &amount,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     let last_event = env.events().all().last().unwrap();
@@ -509,10 +558,14 @@ fn test_single_defaulter_penalty() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &penalty_amount,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: penalty_amount,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Only user1 contributes
@@ -565,10 +618,14 @@ fn test_multiple_defaulters_penalty() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &penalty_amount,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: penalty_amount,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Only user1 contributes
@@ -617,10 +674,14 @@ fn test_member_suspension_after_two_defaults() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &penalty_amount,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: penalty_amount,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // ROUND 0: user2 defaults
@@ -676,10 +737,14 @@ fn test_suspended_member_skipped_in_payout() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &penalty_amount,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: penalty_amount,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Suspend user2 by making them default twice
@@ -738,10 +803,15 @@ fn test_cannot_penalise_before_deadline() {
         &100,
         &Address::generate(&env),
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &50, // penalty_amount
-        &0,  // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Try to penalise before any round is closed (no defaulters identified yet)
@@ -768,10 +838,15 @@ fn test_penalty_disabled_when_amount_zero() {
         &100,
         &Address::generate(&env),
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // penalty_amount disabled
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount disabled
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -807,10 +882,15 @@ fn test_cannot_penalise_non_defaulter() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &50, // penalty_amount
-        &0,  // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 50,
+            exit_penalty_bps: // penalty_amount
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Both users contribute (no defaulters)
@@ -849,10 +929,14 @@ fn test_read_interface_lifecycle() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     let info = client.get_group_info();
@@ -916,10 +1000,14 @@ fn test_member_status_resets_after_round() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // 1. u1 contributes. Round is NOT over because u2 hasn't paid.
@@ -967,10 +1055,14 @@ fn test_add_member_before_round() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Add the new member before any round starts (paid_members is empty)
@@ -1015,10 +1107,14 @@ fn test_add_member_mid_round_panics() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // u1 contributes — now paid_members is non-empty (mid-round)
@@ -1056,10 +1152,14 @@ fn test_remove_member_between_rounds() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Complete round 0 so paid_members is reset
@@ -1106,10 +1206,14 @@ fn test_remove_member_mid_round_panics() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // u1 contributes — mid-round state
@@ -1149,10 +1253,14 @@ fn test_remove_member_who_already_received_payout() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Round 0: u1 receives payout
@@ -1240,10 +1348,14 @@ fn test_init_with_approved_token() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 }
 
@@ -1274,10 +1386,14 @@ fn test_init_with_unapproved_token_panics() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 }
 
@@ -1300,10 +1416,14 @@ fn test_init_twice_panics() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Second init should panic
@@ -1313,10 +1433,14 @@ fn test_init_twice_panics() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 }
 
@@ -1335,10 +1459,14 @@ fn test_contribute_non_member_panics() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Non-member trying to contribute
@@ -1361,10 +1489,14 @@ fn test_contribute_twice_panics() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // First contribution
@@ -1393,10 +1525,14 @@ fn test_payout_correct_member_n_group() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Round 0: u1 gets the pot (4 * 100 = 400)
@@ -1456,10 +1592,14 @@ fn test_contract_balance_zero_after_round() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Before contributions, balance is 0
@@ -1489,10 +1629,14 @@ fn test_single_member_rosca() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Single member contributes, should immediately complete round and payout to self
@@ -1526,10 +1670,14 @@ fn test_large_group_rosca() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Do 1 full cycle (10 rounds)
@@ -1568,10 +1716,14 @@ fn test_get_state_lifecycle_details() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Before any contributions
@@ -1613,10 +1765,14 @@ fn test_bump_storage() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Call bump_storage
@@ -1651,10 +1807,14 @@ fn test_reward_distribution_scenarios() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // 1. Deposit Rewards
@@ -1724,10 +1884,14 @@ fn test_contribution_pot_separation() {
         &100,
         &setup.token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0, // exit_penalty_bps (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // Deposit rewards
@@ -1791,10 +1955,15 @@ fn setup_exit_env(
         &100,
         &token_admin_addr,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,    // penalty_amount (defaulter penalty, distinct from exit penalty)
-        &1000, // exit_penalty_bps = 10%
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // penalty_amount (defaulter penalty, distinct from exit penalty)
+        &1000,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     (client, admin, u1, u2, u3, token_client, token_admin_addr)
@@ -2060,10 +2229,15 @@ fn test_exit_with_zero_penalty() {
         &100,
         &token_admin_addr,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0, // defaulter penalty disabled
-        &0, // exit_penalty_bps = 0%  (no penalty)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: // defaulter penalty disabled
+        &0,
+            collective_goal: ,
+            member_goals: None
+        },
     );
 
     // u1 contributes in round 0 but u2 does NOT → round never auto-completes.
@@ -2154,10 +2328,14 @@ fn test_pause_and_resume_flow() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
 
     // Default state: not paused
@@ -2215,10 +2393,14 @@ fn test_paused_blocks_contribute() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
 
     client.pause_group(&soroban_sdk::String::from_str(&env, "Pause"));
@@ -2245,10 +2427,14 @@ fn test_cannot_pause_already_paused() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
 
     let r = soroban_sdk::String::from_str(&env, "P");
@@ -2276,11 +2462,109 @@ fn test_cannot_resume_not_paused() {
         &100,
         &token_admin,
         &3600,
-        &PayoutStrategy::RoundRobin,
-        &None,
-        &0,
-        &0,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
     );
 
     client.resume_group(&soroban_sdk::String::from_str(&env, "R"));
+}
+
+#[test]
+fn test_collective_savings_goal() {
+    let setup = setup_env();
+    let u1 = Address::generate(&setup.env);
+    let u2 = Address::generate(&setup.env);
+    let members = vec![&setup.env, u1.clone(), u2.clone()];
+    
+    // Total goal: 400 (4 contributions of 100)
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100i128,
+        &setup.token_admin,
+        &3600u64,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: Some(400i128),
+            member_goals: None,
+        },
+    );
+    
+    setup.env.ledger().set_timestamp(100);
+    setup.token_admin_client.mint(&u1, &1000);
+    setup.token_admin_client.mint(&u2, &1000);
+
+    // 1st contribution (25%)
+    setup.client.contribute(&u1);
+    
+    let events = setup.env.events().all();
+    let last_event = events.last().unwrap();
+    // Milestone 25 reached
+    assert_eq!(last_event.1, vec![&setup.env, symbol_short!("milestone").into_val(&setup.env), 25u32.into_val(&setup.env)]);
+    assert_eq!(last_event.2, 100i128.into_val(&setup.env));
+
+    // 2nd contribution (50%)
+    setup.client.contribute(&u2);
+    let events = setup.env.events().all();
+    let last_event = events.last().unwrap();
+    // Milestone 50 reached
+    assert_eq!(last_event.1, vec![&setup.env, symbol_short!("milestone").into_val(&setup.env), 50u32.into_val(&setup.env)]);
+    assert_eq!(last_event.2, 200i128.into_val(&setup.env));
+
+    let (total, goal, _, _) = setup.client.get_savings_progress(&None);
+    assert_eq!(total, 200i128);
+    assert_eq!(goal, 400i128);
+}
+
+#[test]
+fn test_individual_member_goals() {
+    let setup = setup_env();
+    let u1 = Address::generate(&setup.env);
+    let members = vec![&setup.env, u1.clone()];
+    
+    let mut member_goals = Map::new(&setup.env);
+    member_goals.set(u1.clone(), 300i128);
+
+    setup.client.init(
+        &setup.admin,
+        &members,
+        &100i128,
+        &setup.token_admin,
+        &3600u64,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: Some(member_goals),
+        },
+    );
+    
+    setup.env.ledger().set_timestamp(100);
+    setup.token_admin_client.mint(&u1, &1000);
+
+    // Round 0
+    setup.client.contribute(&u1);
+    let (total, _, m_done, m_goal) = setup.client.get_savings_progress(&Some(u1.clone()));
+    assert_eq!(total, 100i128);
+    assert_eq!(m_done, 100i128);
+    assert_eq!(m_goal, 300i128);
+
+    // Round 1
+    setup.env.ledger().set_timestamp(4000);
+    setup.client.close_round();
+    setup.client.contribute(&u1);
+    
+    let (_, _, m_done, _) = setup.client.get_savings_progress(&Some(u1.clone()));
+    assert_eq!(m_done, 200i128);
 }

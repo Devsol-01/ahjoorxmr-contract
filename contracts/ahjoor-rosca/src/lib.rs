@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec,
 };
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -19,6 +19,17 @@ pub enum DistributionType {
     Equal = 0,
     Proportional = 1,
     Weighted = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoscaConfig {
+    pub strategy: PayoutStrategy,
+    pub custom_order: Option<Vec<Address>>,
+    pub penalty_amount: i128,
+    pub exit_penalty_bps: u32,
+    pub collective_goal: Option<i128>,
+    pub member_goals: Option<Map<Address, i128>>,
 }
 
 #[contracttype]
@@ -81,6 +92,11 @@ pub enum DataKey {
     IsPaused,            // bool
     PauseReason,         // String
     PauseTimestamp,      // u64
+    CollectiveGoal,      // i128
+    TotalCollected,      // i128
+    MemberGoals,         // Map<Address, i128>
+    MemberCollected,     // Map<Address, i128>
+    MilestonesReached,   // Vec<u32> (e.g. 25, 50, 75, 100)
 }
 
 #[contract]
@@ -95,10 +111,7 @@ impl AhjoorContract {
         contribution_amount: i128,
         token: Address,
         round_duration: u64,
-        strategy: PayoutStrategy,
-        custom_order: Option<Vec<Address>>,
-        penalty_amount: i128,
-        exit_penalty_bps: u32,
+        config: RoscaConfig,
     ) {
         if env.storage().instance().has(&DataKey::Members) {
             panic!("Already initialized");
@@ -114,10 +127,10 @@ impl AhjoorContract {
             panic!("Token not approved");
         }
 
-        let resolved_order = match strategy {
+        let resolved_order = match config.strategy {
             PayoutStrategy::RoundRobin => members.clone(),
             PayoutStrategy::AdminAssigned => {
-                let order = custom_order.expect("AdminAssigned strategy requires a custom order");
+                let order = config.custom_order.expect("AdminAssigned strategy requires a custom order");
                 if order.len() != members.len() {
                     panic!("Custom order length mismatch");
                 }
@@ -139,7 +152,7 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::PayoutOrder, &resolved_order);
-        env.storage().instance().set(&DataKey::Strategy, &strategy);
+        env.storage().instance().set(&DataKey::Strategy, &config.strategy);
         env.storage()
             .instance()
             .set(&DataKey::ContributionAmt, &contribution_amount);
@@ -159,10 +172,13 @@ impl AhjoorContract {
             .set(&DataKey::Defaulters, &Vec::<Address>::new(&env));
         env.storage()
             .instance()
-            .set(&DataKey::PenaltyAmount, &penalty_amount);
+            .set(&DataKey::PenaltyAmount, &config.penalty_amount);
         env.storage()
             .instance()
             .set(&DataKey::DefaultCount, &Map::<Address, u32>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::SuspendedMembers, &Vec::<Address>::new(&env));
         env.storage()
             .instance()
             .set(&DataKey::RoundHistory, &Vec::<PayoutRecord>::new(&env));
@@ -186,7 +202,7 @@ impl AhjoorContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::ExitPenaltyBps, &exit_penalty_bps);
+            .set(&DataKey::ExitPenaltyBps, &config.exit_penalty_bps);
         env.storage().instance().set(
             &DataKey::ExitRequests,
             &Map::<Address, ExitRequest>::new(&env),
@@ -195,6 +211,21 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ExitedMembers, &Vec::<Address>::new(&env));
         env.storage().instance().set(&DataKey::IsPaused, &false);
+
+        // Savings Goal Initialization
+        if let Some(goal) = config.collective_goal {
+            env.storage().instance().set(&DataKey::CollectiveGoal, &goal);
+        }
+        if let Some(goals) = config.member_goals {
+            env.storage().instance().set(&DataKey::MemberGoals, &goals);
+        }
+        env.storage().instance().set(&DataKey::TotalCollected, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MemberCollected, &Map::<Address, i128>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::MilestonesReached, &Vec::<u32>::new(&env));
 
         env.events().publish(
             (symbol_short!("init"),),
@@ -296,6 +327,48 @@ impl AhjoorContract {
 
         if paid_members.len() == members.len() {
             Self::complete_round_payout(&env, &paid_members, amount, client);
+        }
+
+        // Savings Goal Progress Tracking
+        let mut total_collected: i128 = env.storage().instance().get(&DataKey::TotalCollected).unwrap_or(0);
+        total_collected += amount;
+        env.storage().instance().set(&DataKey::TotalCollected, &total_collected);
+
+        let mut member_collected: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberCollected)
+            .unwrap_or(Map::new(&env));
+        let m_collected = member_collected.get(contributor.clone()).unwrap_or(0) + amount;
+        member_collected.set(contributor.clone(), m_collected);
+        env.storage().instance().set(&DataKey::MemberCollected, &member_collected);
+
+        // Milestone Detection
+        if let Some(collective_goal) = env.storage().instance().get::<_, i128>(&DataKey::CollectiveGoal) {
+            let mut milestones_reached: Vec<u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MilestonesReached)
+                .unwrap_or(Vec::new(&env));
+
+            let total_collected_i128 = total_collected as i128;
+            let collective_goal_i128 = collective_goal as i128;
+            let progress_bps = (total_collected_i128 * 10000i128) / collective_goal_i128;
+            let thresholds: [u32; 4] = [2500u32, 5000u32, 7500u32, 10000u32];
+            let milestone_names: [u32; 4] = [25u32, 50u32, 75u32, 100u32];
+
+            for i in 0..4 {
+                let threshold = thresholds[i];
+                let milestone = milestone_names[i];
+                if progress_bps >= threshold as i128 && !milestones_reached.contains(&milestone) {
+                    milestones_reached.push_back(milestone);
+                    env.events().publish(
+                        (symbol_short!("milestone"), milestone),
+                        total_collected,
+                    );
+                }
+            }
+            env.storage().instance().set(&DataKey::MilestonesReached, &milestones_reached);
         }
 
         env.storage()
@@ -816,6 +889,44 @@ impl AhjoorContract {
             .unwrap_or(PayoutStrategy::RoundRobin);
         let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         (current_round, paid_members, deadline, strategy, token)
+    }
+
+    pub fn get_savings_progress(
+        env: Env,
+        member: Option<Address>,
+    ) -> (i128, i128, i128, i128) {
+        let total_collected = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalCollected)
+            .unwrap_or(0);
+        let collective_goal = env
+            .storage()
+            .instance()
+            .get(&DataKey::CollectiveGoal)
+            .unwrap_or(0);
+
+        let (member_collected, member_goal) = if let Some(m) = member {
+            let m_collected = env
+                .storage()
+                .instance()
+                .get::<_, Map<Address, i128>>(&DataKey::MemberCollected)
+                .unwrap_or(Map::new(&env))
+                .get(m.clone())
+                .unwrap_or(0);
+            let m_goal = env
+                .storage()
+                .instance()
+                .get::<_, Map<Address, i128>>(&DataKey::MemberGoals)
+                .unwrap_or(Map::new(&env))
+                .get(m)
+                .unwrap_or(0);
+            (m_collected, m_goal)
+        } else {
+            (0, 0)
+        };
+
+        (total_collected, collective_goal, member_collected, member_goal)
     }
 
     // --- EMERGENCY EXIT ---

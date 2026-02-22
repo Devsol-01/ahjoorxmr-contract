@@ -81,6 +81,8 @@ pub enum DataKey {
     IsPaused,            // bool
     PauseReason,         // String
     PauseTimestamp,      // u64
+    ExchangeRates,       // Map<Address, i128>
+    TokenLimits,         // Map<Address, i128>
 }
 
 #[contract]

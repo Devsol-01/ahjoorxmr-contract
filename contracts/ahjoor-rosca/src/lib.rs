@@ -137,6 +137,7 @@ pub enum DataKey {
     ProposalVotes,       // Map<u32, Map<Address, bool>> (proposal_id -> member_address -> has_voted)
     VotingDeadline,      // u64
     QuorumPercentage,    // u32 (e.g., 51 for 51%)
+    MemberContributions, // Map<Address, i128>  cumulative per round
 }
 
 #[contract]
@@ -265,6 +266,10 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ExitedMembers, &Vec::<Address>::new(&env));
         env.storage().instance().set(&DataKey::IsPaused, &false);
+        env.storage().instance().set(
+            &DataKey::MemberContributions,
+            &Map::<Address, i128>::new(&env),
+        );
 
         // Savings Goal Initialization
         if let Some(goal) = config.collective_goal {
@@ -307,9 +312,13 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    pub fn contribute(env: Env, contributor: Address, token: Address) {
+    pub fn contribute(env: Env, contributor: Address, token: Address, amount: i128) {
         Self::check_not_paused(&env);
         contributor.require_auth();
+
+        if amount <= 0 {
+            panic!("Contribution amount must be positive");
+        }
 
         let deadline: u64 = env
             .storage()
@@ -344,7 +353,7 @@ impl AhjoorContract {
             .get(&DataKey::PaidMembers)
             .expect("Not initialized");
         if paid_members.contains(&contributor) {
-            panic!("Already contributed for this round");
+            panic!("Already contributed full amount for this round");
         }
 
         // Validate token
@@ -402,95 +411,119 @@ impl AhjoorContract {
             .get(&DataKey::CurrentRound)
             .unwrap_or(0);
 
+        // Load (and update) cumulative contributions for this round
+        let mut member_contributions: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberContributions)
+            .unwrap_or(Map::new(&env));
+        let already_paid: i128 = member_contributions.get(contributor.clone()).unwrap_or(0);
+        let remaining = base_amount - already_paid;
+
+        if amount > remaining {
+            panic!("Amount exceeds remaining contribution");
+        }
+
+        let new_total = already_paid + amount;
+        member_contributions.set(contributor.clone(), new_total);
+        env.storage()
+            .instance()
+            .set(&DataKey::MemberContributions, &member_contributions);
+
+
         env.events().publish(
             (symbol_short!("contrib"), contributor.clone(), current_round),
             (token, amount_to_transfer),
         );
 
-        paid_members.push_back(contributor.clone());
-        env.storage()
-            .instance()
-            .set(&DataKey::PaidMembers, &paid_members);
-
-        // Track reward participation
-        let mut total_participations: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalParticipations)
-            .unwrap_or(0);
-        let mut member_participation: Map<Address, u32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::MemberParticipation)
-            .unwrap_or(Map::new(&env));
-
-        let current_participation = member_participation.get(contributor.clone()).unwrap_or(0);
-        member_participation.set(contributor.clone(), current_participation + 1);
-        total_participations += 1;
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalParticipations, &total_participations);
-        env.storage()
-            .instance()
-            .set(&DataKey::MemberParticipation, &member_participation);
-
-        if paid_members.len() == members.len() {
-            Self::complete_round_payout(&env, &paid_members);
-        }
-
-        // Savings Goal Progress Tracking
-        let mut total_collected: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalCollected)
-            .unwrap_or(0);
-        total_collected += amount_to_transfer; // fix: was `amount` (undefined), use `amount_to_transfer`
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalCollected, &total_collected);
-
-        let mut member_collected: Map<Address, i128> = env
-            .storage()
-            .instance()
-            .get(&DataKey::MemberCollected)
-            .unwrap_or(Map::new(&env));
-        let m_collected = member_collected.get(contributor.clone()).unwrap_or(0) + amount_to_transfer; // fix: was `amount`
-        member_collected.set(contributor.clone(), m_collected);
-        env.storage()
-            .instance()
-            .set(&DataKey::MemberCollected, &member_collected);
-
-        // Milestone Detection
-        if let Some(collective_goal) = env
-            .storage()
-            .instance()
-            .get::<_, i128>(&DataKey::CollectiveGoal)
-        {
-            let mut milestones_reached: Vec<u32> = env
-                .storage()
-                .instance()
-                .get(&DataKey::MilestonesReached)
-                .unwrap_or(Vec::new(&env));
-
-            let progress_bps = (total_collected * 10000i128) / collective_goal;
-            let thresholds: [u32; 4] = [2500u32, 5000u32, 7500u32, 10000u32];
-            let milestone_names: [u32; 4] = [25u32, 50u32, 75u32, 100u32];
-
-            for i in 0..4 {
-                let threshold = thresholds[i];
-                let milestone = milestone_names[i];
-                if progress_bps >= threshold as i128 && !milestones_reached.contains(&milestone) {
-                    milestones_reached.push_back(milestone);
-                    env.events().publish(
-                        (symbol_short!("milestone"), milestone),
-                        total_collected,
-                    );
-                }
-            }
+        // Only mark as fully paid (and track participation) when target is reached
+        if new_total == target {
+            paid_members.push_back(contributor.clone());
             env.storage()
                 .instance()
-                .set(&DataKey::MilestonesReached, &milestones_reached);
+                .set(&DataKey::PaidMembers, &paid_members);
+
+            // Track reward participation
+            let mut total_participations: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalParticipations)
+                .unwrap_or(0);
+            let mut member_participation: Map<Address, u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MemberParticipation)
+                .unwrap_or(Map::new(&env));
+
+            let current_participation =
+                member_participation.get(contributor.clone()).unwrap_or(0);
+            member_participation.set(contributor.clone(), current_participation + 1);
+            total_participations += 1;
+
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalParticipations, &total_participations);
+            env.storage()
+                .instance()
+                .set(&DataKey::MemberParticipation, &member_participation);
+
+            // Only trigger payout when all members have fully contributed
+            if new_total == base_amount && paid_members.len() == members.len() {
+                Self::complete_round_payout(&env, &paid_members);
+            }
+
+            // Savings Goal Progress Tracking
+            let mut total_collected: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalCollected)
+                .unwrap_or(0);
+            total_collected += amount;
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalCollected, &total_collected);
+
+            let mut member_collected: Map<Address, i128> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MemberCollected)
+                .unwrap_or(Map::new(&env));
+            let m_collected = member_collected.get(contributor.clone()).unwrap_or(0) + amount;
+            member_collected.set(contributor.clone(), m_collected);
+            env.storage()
+                .instance()
+                .set(&DataKey::MemberCollected, &member_collected);
+
+            // Milestone Detection
+            if let Some(collective_goal) = env
+                .storage()
+                .instance()
+                .get::<_, i128>(&DataKey::CollectiveGoal)
+            {
+                let mut milestones_reached: Vec<u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MilestonesReached)
+                    .unwrap_or(Vec::new(&env));
+
+                let progress_bps = (total_collected * 10000i128) / collective_goal;
+                let thresholds: [u32; 4] = [2500u32, 5000u32, 7500u32, 10000u32];
+                let milestone_names: [u32; 4] = [25u32, 50u32, 75u32, 100u32];
+
+                for i in 0..4 {
+                    let threshold = thresholds[i];
+                    let milestone = milestone_names[i];
+                    if progress_bps >= threshold as i128 && !milestones_reached.contains(&milestone) {
+                        milestones_reached.push_back(milestone);
+                        env.events().publish(
+                            (symbol_short!("milestone"), milestone),
+                            total_collected,
+                        );
+                    }
+                }
+                env.storage()
+                    .instance()
+                    .set(&DataKey::MilestonesReached, &milestones_reached);
         }
 
         env.storage()
@@ -1347,6 +1380,24 @@ impl AhjoorContract {
         paid_members.contains(&member)
     }
 
+    /// Returns `(amount_contributed_so_far, amount_remaining)` for `member`
+    /// in the current round.
+    pub fn get_member_contribution_status(env: Env, member: Address) -> (i128, i128) {
+        let target: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContributionAmt)
+            .unwrap_or(0);
+        let member_contributions: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberContributions)
+            .unwrap_or(Map::new(&env));
+        let contributed = member_contributions.get(member).unwrap_or(0);
+        let remaining = target - contributed;
+        (contributed, remaining)
+    }
+
     pub fn get_round_history(env: Env) -> Vec<PayoutRecord> {
         env.storage()
             .instance()
@@ -1379,6 +1430,84 @@ impl AhjoorContract {
         (current_round, paid_members, deadline, strategy, token)
     }
 
+    pub fn emit_deadline_reminder(env: Env, interval: Symbol) {
+        Self::check_not_paused(&env);
+
+        let current_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentRound)
+            .unwrap_or(0);
+        let deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDeadline)
+            .unwrap_or(0);
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        let paid_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaidMembers)
+            .unwrap_or(Vec::new(&env));
+        let exited_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitedMembers)
+            .unwrap_or(Vec::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let time_remaining = if deadline > current_time {
+            deadline - current_time
+        } else {
+            0
+        };
+
+        let mut non_contributors = Vec::new(&env);
+        for member in members.iter() {
+            if !paid_members.contains(&member) && !exited_members.contains(&member) {
+                non_contributors.push_back(member);
+            }
+        }
+
+        env.events().publish(
+            (symbol_short!("reminder"),),
+            (current_round, time_remaining, non_contributors, interval),
+        );
+    }
+
+    pub fn get_upcoming_deadlines(env: Env, count: u32) -> Map<u32, u64> {
+        let current_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentRound)
+            .unwrap_or(0);
+        let current_deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDeadline)
+            .unwrap_or(0);
+        let round_duration: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDuration)
+            .unwrap_or(0);
+
+        let mut deadlines = Map::new(&env);
+        for i in 0..count {
+            let round = current_round + i;
+            let deadline = if i == 0 {
+                current_deadline
+            } else {
+                current_deadline + (i as u64 * round_duration)
+            };
+            deadlines.set(round, deadline);
+        }
+    }
+  
     pub fn get_savings_progress(
         env: Env,
         member: Option<Address>,
@@ -1876,6 +2005,10 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::PaidMembers, &Vec::<Address>::new(env));
+        env.storage().instance().set(
+            &DataKey::MemberContributions,
+            &Map::<Address, i128>::new(env),
+        );
         env.storage().instance().set(
             &DataKey::RoundDeadline,
             &(env.ledger().timestamp() + duration),

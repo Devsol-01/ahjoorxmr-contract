@@ -437,7 +437,7 @@ impl AhjoorContract {
         );
 
         // Only mark as fully paid (and track participation) when target is reached
-        if new_total == target {
+        if new_total == base_amount {
             paid_members.push_back(contributor.clone());
             env.storage()
                 .instance()
@@ -524,6 +524,7 @@ impl AhjoorContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::MilestonesReached, &milestones_reached);
+            }
         }
 
         env.storage()
@@ -1506,6 +1507,7 @@ impl AhjoorContract {
             };
             deadlines.set(round, deadline);
         }
+        deadlines
     }
   
     pub fn get_savings_progress(

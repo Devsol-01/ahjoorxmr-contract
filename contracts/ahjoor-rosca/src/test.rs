@@ -2179,11 +2179,12 @@ fn test_exit_request_event_emitted() {
 
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
-    // Topic[0] should be the symbol "ExitRequested"
-    assert_eq!(
-        last.1,
-        vec![&env, Symbol::new(&env, "ExitRequested").into_val(&env),]
-    );
+
+    // Topics check
+    let topics = last.1;
+    assert_eq!(topics.len(), 1);
+    let topic0: Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, Symbol::new(&env, "exit_requested"));
 
     // Data should be (member, round, refund_amount)
     let (member, round, refund_amount): (Address, u32, i128) = last.2.into_val(&env);
@@ -2205,11 +2206,13 @@ fn test_exit_approval_event_emitted() {
 
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
-    // Topic[0] should be the symbol "ExitApproved"
-    assert_eq!(
-        last.1,
-        vec![&env, Symbol::new(&env, "ExitApproved").into_val(&env),]
-    );
+
+    // Topics check
+    let topics = last.1;
+    assert_eq!(topics.len(), 1);
+    let topic0: Symbol = topics.get(0).unwrap().into_val(&env);
+    assert_eq!(topic0, Symbol::new(&env, "exit_approved"));
+
     // Data should be (member, refund_amount)
     let (member, refund_amount): (Address, i128) = last.2.into_val(&env);
     assert_eq!(member, u1);
@@ -2537,13 +2540,10 @@ fn test_emit_deadline_reminder() {
     let reminder_event = events.get(events.len() - 1).unwrap();
 
     // Topic check: (DeadlineReminder,)
-    assert_eq!(
-        reminder_event.1,
-        vec![
-            &setup.env,
-            Symbol::new(&setup.env, "DeadlineReminder").into_val(&setup.env)
-        ]
-    );
+    let topics = reminder_event.1;
+    assert_eq!(topics.len(), 1);
+    let topic0: Symbol = topics.get(0).unwrap().into_val(&setup.env);
+    assert_eq!(topic0, Symbol::new(&setup.env, "deadline_reminder"));
 
     // Data check: (round, time_remaining, non_contributors, interval)
     let (round, time_remaining, non_contributors, interval): (u32, u64, Vec<Address>, Symbol) =

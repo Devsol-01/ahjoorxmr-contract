@@ -4,8 +4,9 @@ use super::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Events, Ledger},
-    symbol_short, vec, Address, Env, IntoVal, Symbol,
+    vec, Address, Env, IntoVal, Symbol,
 };
 
 pub struct TestSetup<'a> {
@@ -80,7 +81,7 @@ fn test_rosca_flow_with_time_locks() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(100);
@@ -127,7 +128,7 @@ fn test_cannot_close_early() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(500);
@@ -167,7 +168,7 @@ fn test_on_time_contribution() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(1000);
@@ -207,7 +208,7 @@ fn test_late_contribution_rejection() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -241,7 +242,7 @@ fn test_admin_close_round() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -289,7 +290,7 @@ fn test_admin_assigned_strategy_execution() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     client.contribute(&user1, &token_admin, &100);
@@ -325,7 +326,7 @@ fn test_invalid_admin_order_validation() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 }
 
@@ -367,7 +368,7 @@ fn test_round_robin_e2e_all_rounds() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // ROUND 0: u1 should get the payout
@@ -420,7 +421,7 @@ fn test_admin_assigned_e2e_all_rounds() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // ROUND 0: u2 should get the payout first
@@ -433,7 +434,6 @@ fn test_admin_assigned_e2e_all_rounds() {
     client.contribute(&u2, &token_admin, &100);
     assert_eq!(token_client.balance(&u1), 2000);
 }
-
 
 // --- PENALTY AND DEFAULTER HANDLING TESTS ---
 
@@ -474,7 +474,7 @@ fn test_single_defaulter_penalty() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Only user1 contributes
@@ -534,7 +534,7 @@ fn test_multiple_defaulters_penalty() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Only user1 contributes
@@ -590,7 +590,7 @@ fn test_member_suspension_after_two_defaults() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // ROUND 0: user2 defaults
@@ -653,7 +653,7 @@ fn test_suspended_member_skipped_in_payout() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Suspend user2 by making them default twice
@@ -720,7 +720,7 @@ fn test_cannot_penalise_before_deadline() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Try to penalise before any round is closed (no defaulters identified yet)
@@ -754,7 +754,7 @@ fn test_penalty_disabled_when_amount_zero() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     env.ledger().set_timestamp(3601);
@@ -797,7 +797,7 @@ fn test_cannot_penalise_non_defaulter() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Both users contribute (no defaulters)
@@ -843,7 +843,7 @@ fn test_read_interface_lifecycle() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     let info = client.get_group_info();
@@ -866,7 +866,6 @@ fn test_read_interface_lifecycle() {
 
     // 3. STAGE: Post-Payout (Round 0 Complete)
     client.contribute(&u2, &token_admin, &100); // This triggers complete_round_payout
-
 
     // Verify History
     let history = client.get_round_history();
@@ -915,7 +914,7 @@ fn test_member_status_resets_after_round() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // 1. u1 contributes. Round is NOT over because u2 hasn't paid.
@@ -970,7 +969,7 @@ fn test_add_member_before_round() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Add the new member before any round starts (paid_members is empty)
@@ -1022,7 +1021,7 @@ fn test_add_member_mid_round_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // u1 contributes — now paid_members is non-empty (mid-round)
@@ -1067,7 +1066,7 @@ fn test_remove_member_between_rounds() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Complete round 0 so paid_members is reset
@@ -1121,7 +1120,7 @@ fn test_remove_member_mid_round_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // u1 contributes — mid-round state
@@ -1168,7 +1167,7 @@ fn test_remove_member_who_already_received_payout() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Round 0: u1 receives payout
@@ -1263,7 +1262,7 @@ fn test_init_with_approved_token() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 }
 
@@ -1301,7 +1300,7 @@ fn test_init_with_unapproved_token_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 }
 
@@ -1331,7 +1330,7 @@ fn test_init_twice_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Second init should panic
@@ -1348,7 +1347,7 @@ fn test_init_twice_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 }
 
@@ -1374,11 +1373,13 @@ fn test_contribute_non_member_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Non-member trying to contribute
-    setup.client.contribute(&non_member, &setup.token_admin, &100);
+    setup
+        .client
+        .contribute(&non_member, &setup.token_admin, &100);
 }
 
 #[test]
@@ -1404,7 +1405,7 @@ fn test_contribute_twice_panics() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // First contribution
@@ -1440,7 +1441,7 @@ fn test_payout_correct_member_n_group() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Round 0: u1 gets the pot (4 * 100 = 400)
@@ -1507,7 +1508,7 @@ fn test_contract_balance_zero_after_round() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Before contributions, balance is 0
@@ -1544,7 +1545,7 @@ fn test_single_member_rosca() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Single member contributes, should immediately complete round and payout to self
@@ -1585,7 +1586,7 @@ fn test_large_group_rosca() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Do 1 full cycle (10 rounds)
@@ -1631,7 +1632,7 @@ fn test_get_state_lifecycle_details() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Before any contributions
@@ -1680,7 +1681,7 @@ fn test_bump_storage() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Call bump_storage
@@ -1722,7 +1723,7 @@ fn test_reward_distribution_scenarios() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // 1. Deposit Rewards
@@ -1799,7 +1800,7 @@ fn test_contribution_pot_separation() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Deposit rewards
@@ -1870,7 +1871,7 @@ fn setup_exit_env(
             exit_penalty_bps: 1000,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     (client, admin, u1, u2, u3, token_client, token_admin_addr)
@@ -2143,7 +2144,7 @@ fn test_exit_with_zero_penalty() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // u1 contributes in round 0 but u2 does NOT → round never auto-completes.
@@ -2178,15 +2179,17 @@ fn test_exit_request_event_emitted() {
 
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
-    // Topic[0] should be the symbol "exit_req"
+    // Topic[0] should be the symbol "ExitRequested"
     assert_eq!(
         last.1,
-        vec![
-            &env,
-            symbol_short!("exit_req").into_val(&env),
-            u1.into_val(&env)
-        ]
+        vec![&env, Symbol::new(&env, "ExitRequested").into_val(&env),]
     );
+
+    // Data should be (member, round, refund_amount)
+    let (member, round, refund_amount): (Address, u32, i128) = last.2.into_val(&env);
+    assert_eq!(member, u1);
+    assert_eq!(round, 0);
+    assert_eq!(refund_amount, 0);
 }
 
 // ---------------------------------------------------------------
@@ -2202,14 +2205,15 @@ fn test_exit_approval_event_emitted() {
 
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
+    // Topic[0] should be the symbol "ExitApproved"
     assert_eq!(
         last.1,
-        vec![
-            &env,
-            symbol_short!("exit_ok").into_val(&env),
-            u1.into_val(&env)
-        ]
+        vec![&env, Symbol::new(&env, "ExitApproved").into_val(&env),]
     );
+    // Data should be (member, refund_amount)
+    let (member, refund_amount): (Address, i128) = last.2.into_val(&env);
+    assert_eq!(member, u1);
+    assert_eq!(refund_amount, 0);
 }
 
 // --- PAUSE AND RESUME TESTS ---
@@ -2241,7 +2245,7 @@ fn test_pause_and_resume_flow() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     // Default state: not paused
@@ -2306,7 +2310,7 @@ fn test_paused_blocks_contribute() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     client.pause_group(&soroban_sdk::String::from_str(&env, "Pause"));
@@ -2340,7 +2344,7 @@ fn test_cannot_pause_already_paused() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     let r = soroban_sdk::String::from_str(&env, "P");
@@ -2375,7 +2379,7 @@ fn test_cannot_resume_not_paused() {
             exit_penalty_bps: 0,
             collective_goal: None,
             member_goals: None,
-        }
+        },
     );
 
     client.resume_group(&soroban_sdk::String::from_str(&env, "R"));
@@ -2503,7 +2507,7 @@ fn test_emit_deadline_reminder() {
     let u1 = Address::generate(&setup.env);
     let u2 = Address::generate(&setup.env);
     let members = vec![&setup.env, u1.clone(), u2.clone()];
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2519,26 +2523,32 @@ fn test_emit_deadline_reminder() {
             member_goals: None,
         },
     );
-    
+
     setup.env.ledger().set_timestamp(100);
-    
+
     // u1 contributes
     setup.token_admin_client.mint(&u1, &100);
     setup.client.contribute(&u1, &setup.token_admin, &100);
-    
+
     // Emit reminder
     setup.client.emit_deadline_reminder(&symbol_short!("24h"));
-    
+
     let events = setup.env.events().all();
     let reminder_event = events.get(events.len() - 1).unwrap();
-    
-    // Topic check: (reminder,)
-    assert_eq!(reminder_event.1, vec![&setup.env, symbol_short!("reminder").into_val(&setup.env)]);
-    
+
+    // Topic check: (DeadlineReminder,)
+    assert_eq!(
+        reminder_event.1,
+        vec![
+            &setup.env,
+            Symbol::new(&setup.env, "DeadlineReminder").into_val(&setup.env)
+        ]
+    );
+
     // Data check: (round, time_remaining, non_contributors, interval)
-    let (round, time_remaining, non_contributors, interval): (u32, u64, Vec<Address>, Symbol) = 
+    let (round, time_remaining, non_contributors, interval): (u32, u64, Vec<Address>, Symbol) =
         reminder_event.2.into_val(&setup.env);
-    
+
     assert_eq!(round, 0);
     assert_eq!(time_remaining, 3500); // 3600 - 100
     assert_eq!(non_contributors.len(), 1);
@@ -2551,9 +2561,9 @@ fn test_get_upcoming_deadlines() {
     let setup = setup_env();
     let u1 = Address::generate(&setup.env);
     let members = vec![&setup.env, u1.clone()];
-    
+
     setup.env.ledger().set_timestamp(100);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2569,7 +2579,7 @@ fn test_get_upcoming_deadlines() {
             member_goals: None,
         },
     );
-    
+
     let deadlines = setup.client.get_upcoming_deadlines(&3);
     assert_eq!(deadlines.len(), 3);
     assert_eq!(deadlines.get(0).unwrap(), 3700); // 100 + 3600
@@ -2586,11 +2596,11 @@ fn test_create_proposal() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2606,7 +2616,7 @@ fn test_create_proposal() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Remove inactive member");
     setup.client.create_proposal(
         &user1,
@@ -2616,9 +2626,9 @@ fn test_create_proposal() {
         &3600,
         &None,
     );
-    
+
     assert_eq!(setup.client.get_proposal_counter(), 1);
-    
+
     let proposal = setup.client.get_proposal(&0);
     assert!(proposal.is_some());
     let prop = proposal.unwrap();
@@ -2634,11 +2644,11 @@ fn test_vote_on_proposal() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2654,7 +2664,7 @@ fn test_vote_on_proposal() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Penalty appeal");
     setup.client.create_proposal(
         &user1,
@@ -2664,10 +2674,10 @@ fn test_vote_on_proposal() {
         &3600,
         &None,
     );
-    
+
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user2, &0, &true);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.votes_for, 2);
     assert_eq!(proposal.votes_against, 0);
@@ -2680,11 +2690,11 @@ fn test_execute_proposal_with_quorum() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2700,7 +2710,7 @@ fn test_execute_proposal_with_quorum() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Update rules");
     setup.client.create_proposal(
         &user1,
@@ -2710,18 +2720,18 @@ fn test_execute_proposal_with_quorum() {
         &3600,
         &Some(75),
     );
-    
+
     // All members vote for the proposal
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user2, &0, &true);
     setup.client.vote_on_proposal(&user3, &0, &true);
-    
+
     // Fast forward past deadline
     setup.env.ledger().set_timestamp(3601);
-    
+
     // Execute the proposal
     setup.client.execute_proposal(&0);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Executed);
     assert_eq!(setup.client.get_quorum_percentage(), 75);
@@ -2734,11 +2744,11 @@ fn test_proposal_insufficient_quorum() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2754,7 +2764,7 @@ fn test_proposal_insufficient_quorum() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
     setup.client.create_proposal(
         &user1,
@@ -2764,16 +2774,16 @@ fn test_proposal_insufficient_quorum() {
         &3600,
         &None,
     );
-    
+
     // Only one member votes (not enough for quorum of 51%)
     setup.client.vote_on_proposal(&user1, &0, &true);
-    
+
     // Fast forward past deadline
     setup.env.ledger().set_timestamp(3601);
-    
+
     // Try to execute - should be rejected due to insufficient quorum
     setup.client.execute_proposal(&0);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -2785,11 +2795,11 @@ fn test_proposal_voted_down() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2805,7 +2815,7 @@ fn test_proposal_voted_down() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Member removal");
     setup.client.create_proposal(
         &user1,
@@ -2815,17 +2825,17 @@ fn test_proposal_voted_down() {
         &3600,
         &None,
     );
-    
+
     // Votes against
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user2, &0, &false);
     setup.client.vote_on_proposal(&user3, &0, &false);
-    
+
     // Fast forward past deadline
     setup.env.ledger().set_timestamp(3601);
-    
+
     setup.client.execute_proposal(&0);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
@@ -2837,11 +2847,11 @@ fn test_penalty_appeal_execution() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2857,17 +2867,17 @@ fn test_penalty_appeal_execution() {
             member_goals: None,
         },
     );
-    
+
     // Penalize user2
     setup.env.ledger().set_timestamp(100);
     setup.client.contribute(&user1, &setup.token_admin, &100);
     setup.client.contribute(&user3, &setup.token_admin, &100);
-    
+
     setup.env.ledger().set_timestamp(3601);
     setup.client.close_round();
-    
+
     setup.client.penalise_defaulter(&user2);
-    
+
     // Create penalty appeal proposal at timestamp 3601
     let description = soroban_sdk::String::from_str(&setup.env, "Appeal penalty");
     setup.client.create_proposal(
@@ -2878,16 +2888,16 @@ fn test_penalty_appeal_execution() {
         &3600,
         &None,
     );
-    
+
     // All vote for appeal
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user2, &0, &true);
     setup.client.vote_on_proposal(&user3, &0, &true);
-    
+
     // Fast forward past voting deadline (3601 + 3600 + 1)
     setup.env.ledger().set_timestamp(7202);
     setup.client.execute_proposal(&0);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Executed);
 }
@@ -2899,11 +2909,11 @@ fn test_member_removal_execution() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2919,7 +2929,7 @@ fn test_member_removal_execution() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Remove member");
     setup.client.create_proposal(
         &user1,
@@ -2929,17 +2939,17 @@ fn test_member_removal_execution() {
         &3600,
         &None,
     );
-    
+
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user2, &0, &true);
     setup.client.vote_on_proposal(&user3, &0, &true);
-    
+
     setup.env.ledger().set_timestamp(3601);
     setup.client.execute_proposal(&0);
-    
+
     let proposal = setup.client.get_proposal(&0).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Executed);
-    
+
     let group_info = setup.client.get_group_info();
     assert!(!group_info.members.contains(&user2));
 }
@@ -2953,11 +2963,11 @@ fn test_non_member_cannot_create_proposal() {
     let user3 = Address::generate(&setup.env);
     let non_member = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -2973,7 +2983,7 @@ fn test_non_member_cannot_create_proposal() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Unauthorized proposal");
     setup.client.create_proposal(
         &non_member,
@@ -2993,11 +3003,11 @@ fn test_cannot_vote_after_deadline() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -3013,7 +3023,7 @@ fn test_cannot_vote_after_deadline() {
             member_goals: None,
         },
     );
-    
+
     setup.env.ledger().set_timestamp(100);
     let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
     setup.client.create_proposal(
@@ -3024,7 +3034,7 @@ fn test_cannot_vote_after_deadline() {
         &3600,
         &None,
     );
-    
+
     // Deadline is at 100 + 3600 = 3700, try to vote at 3701
     setup.env.ledger().set_timestamp(3701);
     setup.client.vote_on_proposal(&user1, &0, &true);
@@ -3038,11 +3048,11 @@ fn test_cannot_vote_twice() {
     let user2 = Address::generate(&setup.env);
     let user3 = Address::generate(&setup.env);
     let members = vec![&setup.env, user1.clone(), user2.clone(), user3.clone()];
-    
+
     setup.token_admin_client.mint(&user1, &1000);
     setup.token_admin_client.mint(&user2, &1000);
     setup.token_admin_client.mint(&user3, &1000);
-    
+
     setup.client.init(
         &setup.admin,
         &members,
@@ -3058,7 +3068,7 @@ fn test_cannot_vote_twice() {
             member_goals: None,
         },
     );
-    
+
     let description = soroban_sdk::String::from_str(&setup.env, "Test proposal");
     setup.client.create_proposal(
         &user1,
@@ -3068,8 +3078,7 @@ fn test_cannot_vote_twice() {
         &3600,
         &None,
     );
-    
+
     setup.client.vote_on_proposal(&user1, &0, &true);
     setup.client.vote_on_proposal(&user1, &0, &false);
 }
-

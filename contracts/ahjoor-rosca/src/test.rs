@@ -2180,17 +2180,24 @@ fn test_exit_request_event_emitted() {
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
 
-    // Topics check
-    let topics = last.1;
-    assert_eq!(topics.len(), 1);
-    let topic0: Symbol = topics.get(0).unwrap().into_val(&env);
-    assert_eq!(topic0, Symbol::new(&env, "exit_requested"));
+    // Verify topics
+    let expected_topics = (Symbol::new(&env, "exit_requested"),).into_val(&env);
+    assert_eq!(last.1, expected_topics);
 
-    // Data should be the struct itself
-    let event: ExitRequested = last.2.into_val(&env);
-    assert_eq!(event.member, u1);
-    assert_eq!(event.round, 0);
-    assert_eq!(event.refund_amount, 0);
+    // Verify data (it's a Map for struct events)
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = last.2.into_val(&env);
+    let member: Address = data
+        .get(Symbol::new(&env, "member"))
+        .unwrap()
+        .into_val(&env);
+    let round: u32 = data.get(Symbol::new(&env, "round")).unwrap().into_val(&env);
+    let refund_amount: i128 = data
+        .get(Symbol::new(&env, "refund_amount"))
+        .unwrap()
+        .into_val(&env);
+    assert_eq!(member, u1);
+    assert_eq!(round, 0);
+    assert_eq!(refund_amount, 0);
 }
 
 // ---------------------------------------------------------------
@@ -2207,16 +2214,22 @@ fn test_exit_approval_event_emitted() {
     let all_events = env.events().all();
     let last = all_events.last().unwrap();
 
-    // Topics check
-    let topics = last.1;
-    assert_eq!(topics.len(), 1);
-    let topic0: Symbol = topics.get(0).unwrap().into_val(&env);
-    assert_eq!(topic0, Symbol::new(&env, "exit_approved"));
+    // Verify topics
+    let expected_topics = (Symbol::new(&env, "exit_approved"),).into_val(&env);
+    assert_eq!(last.1, expected_topics);
 
-    // Data should be the struct itself
-    let event: ExitApproved = last.2.into_val(&env);
-    assert_eq!(event.member, u1);
-    assert_eq!(event.refund_amount, 0);
+    // Verify data
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = last.2.into_val(&env);
+    let member: Address = data
+        .get(Symbol::new(&env, "member"))
+        .unwrap()
+        .into_val(&env);
+    let refund_amount: i128 = data
+        .get(Symbol::new(&env, "refund_amount"))
+        .unwrap()
+        .into_val(&env);
+    assert_eq!(member, u1);
+    assert_eq!(refund_amount, 0);
 }
 
 // --- PAUSE AND RESUME TESTS ---
@@ -2539,19 +2552,34 @@ fn test_emit_deadline_reminder() {
     let events = setup.env.events().all();
     let reminder_event = events.get(events.len() - 1).unwrap();
 
-    // Topic check: (DeadlineReminder,)
-    let topics = reminder_event.1;
-    assert_eq!(topics.len(), 1);
-    let topic0: Symbol = topics.get(0).unwrap().into_val(&setup.env);
-    assert_eq!(topic0, Symbol::new(&setup.env, "deadline_reminder"));
+    // Topic check: (deadline_reminder,)
+    let expected_topics = (Symbol::new(&setup.env, "deadline_reminder"),).into_val(&setup.env);
+    assert_eq!(reminder_event.1, expected_topics);
 
-    // Data should be the struct itself
-    let event: DeadlineReminder = reminder_event.2.into_val(&setup.env);
-    assert_eq!(event.round, 0);
-    assert_eq!(event.time_remaining, 3500); // 3600 - 100
-    assert_eq!(event.non_contributors.len(), 1);
-    assert!(event.non_contributors.contains(&u2));
-    assert_eq!(event.interval, symbol_short!("24h"));
+    // Data check via map
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = reminder_event.2.into_val(&setup.env);
+    let round: u32 = data
+        .get(Symbol::new(&setup.env, "round"))
+        .unwrap()
+        .into_val(&setup.env);
+    let time_remaining: u64 = data
+        .get(Symbol::new(&setup.env, "time_remaining"))
+        .unwrap()
+        .into_val(&setup.env);
+    let non_contributors: Vec<Address> = data
+        .get(Symbol::new(&setup.env, "non_contributors"))
+        .unwrap()
+        .into_val(&setup.env);
+    let interval: Symbol = data
+        .get(Symbol::new(&setup.env, "interval"))
+        .unwrap()
+        .into_val(&setup.env);
+
+    assert_eq!(round, 0);
+    assert_eq!(time_remaining, 3500); // 3600 - 100
+    assert_eq!(non_contributors.len(), 1);
+    assert!(non_contributors.contains(&u2));
+    assert_eq!(interval, symbol_short!("24h"));
 }
 
 #[test]

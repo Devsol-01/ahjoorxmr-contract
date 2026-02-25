@@ -1,7 +1,5 @@
 #![no_std]
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, Env, Map, Symbol, Vec,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, Map, Symbol, Vec};
 
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 100_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_000;
@@ -147,11 +145,13 @@ pub enum DataKey {
     TokenLimits,         // Map<Address, i128>
     ProposalCounter,     // u32
     Proposals,           // Map<u32, Proposal>
-    ProposalVotes,       // Map<u32, Map<Address, bool>> (proposal_id -> member_address -> has_voted)
-    VotingDeadline,      // u64
-    QuorumPercentage,    // u32 (e.g., 51 for 51%)
+    ProposalVotes, // Map<u32, Map<Address, bool>> (proposal_id -> member_address -> has_voted)
+    VotingDeadline, // u64
+    QuorumPercentage, // u32 (e.g., 51 for 51%)
     MemberContributions, // Map<Address, i128>  cumulative per round
 }
+
+mod events;
 
 #[contract]
 pub struct AhjoorContract;
@@ -184,7 +184,9 @@ impl AhjoorContract {
         let resolved_order = match config.strategy {
             PayoutStrategy::RoundRobin => members.clone(),
             PayoutStrategy::AdminAssigned => {
-                let order = config.custom_order.expect("AdminAssigned strategy requires a custom order");
+                let order = config
+                    .custom_order
+                    .expect("AdminAssigned strategy requires a custom order");
                 if order.len() != members.len() {
                     panic!("Custom order length mismatch");
                 }
@@ -206,7 +208,9 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::PayoutOrder, &resolved_order);
-        env.storage().instance().set(&DataKey::Strategy, &config.strategy);
+        env.storage()
+            .instance()
+            .set(&DataKey::Strategy, &config.strategy);
         env.storage()
             .instance()
             .set(&DataKey::ContributionAmt, &contribution_amount);
@@ -286,12 +290,16 @@ impl AhjoorContract {
 
         // Savings Goal Initialization
         if let Some(goal) = config.collective_goal {
-            env.storage().instance().set(&DataKey::CollectiveGoal, &goal);
+            env.storage()
+                .instance()
+                .set(&DataKey::CollectiveGoal, &goal);
         }
         if let Some(goals) = config.member_goals {
             env.storage().instance().set(&DataKey::MemberGoals, &goals);
         }
-        env.storage().instance().set(&DataKey::TotalCollected, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalCollected, &0i128);
         env.storage()
             .instance()
             .set(&DataKey::MemberCollected, &Map::<Address, i128>::new(&env));
@@ -300,7 +308,9 @@ impl AhjoorContract {
             .set(&DataKey::MilestonesReached, &Vec::<u32>::new(&env));
 
         // Governance Initialization
-        env.storage().instance().set(&DataKey::ProposalCounter, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalCounter, &0u32);
         env.storage()
             .instance()
             .set(&DataKey::Proposals, &Map::<u32, Proposal>::new(&env));
@@ -315,10 +325,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::QuorumPercentage, &51u32);
 
-        env.events().publish(
-            (symbol_short!("init"),),
-            (member_count, contribution_amount),
-        );
+        events::emit_rosc_init(&env, member_count as u32, contribution_amount);
 
         env.storage()
             .instance()
@@ -416,7 +423,11 @@ impl AhjoorContract {
         }
 
         let client = token::Client::new(&env, &token);
-        client.transfer(&contributor, &env.current_contract_address(), &amount_to_transfer);
+        client.transfer(
+            &contributor,
+            &env.current_contract_address(),
+            &amount_to_transfer,
+        );
 
         let current_round: u32 = env
             .storage()
@@ -443,10 +454,12 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::MemberContributions, &member_contributions);
 
-
-        env.events().publish(
-            (symbol_short!("contrib"), contributor.clone(), current_round),
-            (token, amount_to_transfer),
+        events::emit_contrib(
+            &env,
+            contributor.clone(),
+            current_round,
+            token,
+            amount_to_transfer,
         );
 
         // Only mark as fully paid (and track participation) when target is reached
@@ -468,8 +481,7 @@ impl AhjoorContract {
                 .get(&DataKey::MemberParticipation)
                 .unwrap_or(Map::new(&env));
 
-            let current_participation =
-                member_participation.get(contributor.clone()).unwrap_or(0);
+            let current_participation = member_participation.get(contributor.clone()).unwrap_or(0);
             member_participation.set(contributor.clone(), current_participation + 1);
             total_participations += 1;
 
@@ -526,12 +538,10 @@ impl AhjoorContract {
                 for i in 0..4 {
                     let threshold = thresholds[i];
                     let milestone = milestone_names[i];
-                    if progress_bps >= threshold as i128 && !milestones_reached.contains(&milestone) {
+                    if progress_bps >= threshold as i128 && !milestones_reached.contains(&milestone)
+                    {
                         milestones_reached.push_back(milestone);
-                        env.events().publish(
-                            (symbol_short!("milestone"), milestone),
-                            total_collected,
-                        );
+                        events::emit_milestone(&env, milestone, total_collected);
                     }
                 }
                 env.storage()
@@ -587,8 +597,7 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap();
-        env.events()
-            .publish((symbol_short!("closed"), current_round), defaulters);
+        events::emit_closed(&env, current_round, defaulters);
 
         Self::reset_round_state(&env, current_round);
     }
@@ -643,9 +652,12 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap();
-        env.events().publish(
-            (symbol_short!("defaulted"), member.clone(), current_round),
-            (penalty_amount, new_default_count),
+        events::emit_defaulted(
+            &env,
+            member.clone(),
+            current_round,
+            penalty_amount,
+            new_default_count,
         );
 
         if new_default_count >= 2 {
@@ -659,10 +671,7 @@ impl AhjoorContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::SuspendedMembers, &suspended_members);
-                env.events().publish(
-                    (symbol_short!("suspended"), member.clone()),
-                    new_default_count,
-                );
+                events::emit_suspended(&env, member.clone(), new_default_count);
             }
         }
     }
@@ -708,8 +717,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::PayoutOrder, &payout_order);
 
-        env.events()
-            .publish((symbol_short!("mem_add"), new_member), members.len());
+        events::emit_mem_add(&env, new_member, members.len() as u32);
     }
 
     pub fn remove_member(env: Env, member: Address) {
@@ -767,8 +775,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::PayoutOrder, &new_order);
 
-        env.events()
-            .publish((symbol_short!("mem_rmv"), member), new_members.len());
+        events::emit_mem_rmv(&env, member, new_members.len() as u32);
     }
 
     pub fn add_approved_token(env: Env, token: Address) {
@@ -791,7 +798,7 @@ impl AhjoorContract {
             env.storage()
                 .instance()
                 .set(&DataKey::ApprovedTokens, &approved_tokens);
-            env.events().publish((symbol_short!("tok_add"),), token);
+            events::emit_tok_add(&env, token);
         }
     }
 
@@ -820,7 +827,7 @@ impl AhjoorContract {
             env.storage()
                 .instance()
                 .set(&DataKey::ApprovedTokens, &new_approved_tokens);
-            env.events().publish((symbol_short!("tok_rmv"),), token);
+            events::emit_tok_rmv(&env, token);
         }
     }
 
@@ -840,8 +847,10 @@ impl AhjoorContract {
             .unwrap_or(Map::new(&env));
 
         rates.set(token.clone(), rate);
-        env.storage().instance().set(&DataKey::ExchangeRates, &rates);
-        env.events().publish((symbol_short!("rate_set"),), (token, rate));
+        env.storage()
+            .instance()
+            .set(&DataKey::ExchangeRates, &rates);
+        events::emit_rate_set(&env, token, rate);
     }
 
     pub fn set_token_limit(env: Env, token: Address, limit: i128) {
@@ -861,7 +870,7 @@ impl AhjoorContract {
 
         limits.set(token.clone(), limit);
         env.storage().instance().set(&DataKey::TokenLimits, &limits);
-        env.events().publish((symbol_short!("lim_set"),), (token, limit));
+        events::emit_lim_set(&env, token, limit);
     }
 
     pub fn bump_storage(env: Env) {
@@ -889,8 +898,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::RewardPool, &reward_pool);
 
-        env.events()
-            .publish((symbol_short!("rew_dep"), depositor), amount);
+        events::emit_rew_dep(&env, depositor, amount);
     }
 
     pub fn set_reward_dist_params(
@@ -914,7 +922,7 @@ impl AhjoorContract {
             env.storage().instance().set(&DataKey::RewardWeights, &w);
         }
 
-        env.events().publish((symbol_short!("rew_cfg"),), dist_type);
+        events::emit_rew_cfg(&env, dist_type);
     }
 
     pub fn claim_rewards(env: Env, member: Address) {
@@ -942,8 +950,7 @@ impl AhjoorContract {
 
         client.transfer(&env.current_contract_address(), &member, &claimable);
 
-        env.events()
-            .publish((symbol_short!("rew_clm"), member), claimable);
+        events::emit_rew_clm(&env, member, claimable);
     }
 
     pub fn get_claimable_reward(env: Env, member: Address) -> i128 {
@@ -1095,14 +1102,13 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ProposalCounter, &proposal_counter);
 
-        env.events().publish(
-            (symbol_short!("prop_new"), proposal_id),
-            (
-                creator,
-                target_member,
-                current_time,
-                deadline,
-            ),
+        events::emit_prop_new(
+            &env,
+            proposal_id,
+            creator,
+            target_member,
+            current_time,
+            deadline,
         );
 
         env.storage()
@@ -1169,10 +1175,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ProposalVotes, &proposal_votes);
 
-        env.events().publish(
-            (symbol_short!("voted"), proposal_id, voter),
-            vote_for,
-        );
+        events::emit_voted(&env, proposal_id, voter, vote_for);
 
         env.storage()
             .instance()
@@ -1223,9 +1226,12 @@ impl AhjoorContract {
             env.storage()
                 .instance()
                 .set(&DataKey::Proposals, &proposals);
-            env.events().publish(
-                (symbol_short!("prop_rej"), proposal_id),
-                ("insufficient_quorum", total_votes, required_votes),
+            events::emit_prop_rej(
+                &env,
+                proposal_id,
+                Symbol::new(&env, "insufficient_quorum"),
+                total_votes,
+                required_votes,
             );
             return;
         }
@@ -1236,9 +1242,12 @@ impl AhjoorContract {
             env.storage()
                 .instance()
                 .set(&DataKey::Proposals, &proposals);
-            env.events().publish(
-                (symbol_short!("prop_rej"), proposal_id),
-                ("votes_failed", proposal.votes_for, proposal.votes_against),
+            events::emit_prop_rej(
+                &env,
+                proposal_id,
+                Symbol::new(&env, "votes_failed"),
+                proposal.votes_for,
+                proposal.votes_against,
             );
             return;
         }
@@ -1263,9 +1272,11 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::Proposals, &proposals);
 
-        env.events().publish(
-            (symbol_short!("prop_exec"), proposal_id),
-            (proposal.proposal_type as u32, proposal.target_member.clone()),
+        events::emit_prop_exec(
+            &env,
+            proposal_id,
+            proposal.proposal_type as u32,
+            proposal.target_member.clone(),
         );
 
         env.storage()
@@ -1300,8 +1311,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::SuspendedMembers, &new_suspended);
 
-        env.events()
-            .publish((symbol_short!("appeal_ok"), member.clone()), ());
+        events::emit_appeal_ok(env, member.clone());
     }
 
     fn execute_rule_change(env: &Env, new_quorum: Option<i128>) {
@@ -1310,8 +1320,7 @@ impl AhjoorContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::QuorumPercentage, &(quorum as u32));
-                env.events()
-                    .publish((symbol_short!("rule_upd"),), quorum);
+                events::emit_rule_upd(env, quorum);
             }
         }
     }
@@ -1347,8 +1356,7 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::PayoutOrder, &new_order);
 
-        env.events()
-            .publish((symbol_short!("mem_del"), member.clone()), ());
+        events::emit_mem_del(env, member.clone());
     }
 
     // --- READ INTERFACE ---
@@ -1542,9 +1550,12 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             }
         }
 
-        env.events().publish(
-            (symbol_short!("reminder"),),
-            (current_round, time_remaining, non_contributors, interval),
+        events::emit_reminder(
+            &env,
+            current_round,
+            time_remaining,
+            non_contributors,
+            interval,
         );
     }
 
@@ -1577,11 +1588,8 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
         }
         deadlines
     }
-  
-    pub fn get_savings_progress(
-        env: Env,
-        member: Option<Address>,
-    ) -> (i128, i128, i128, i128) {
+
+    pub fn get_savings_progress(env: Env, member: Option<Address>) -> (i128, i128, i128, i128) {
         let total_collected = env
             .storage()
             .instance()
@@ -1613,7 +1621,12 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             (0, 0)
         };
 
-        (total_collected, collective_goal, member_collected, member_goal)
+        (
+            total_collected,
+            collective_goal,
+            member_collected,
+            member_goal,
+        )
     }
 
     pub fn get_exchange_rates(env: Env) -> Map<Address, i128> {
@@ -1693,7 +1706,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             .instance()
             .set(&DataKey::PauseTimestamp, &env.ledger().timestamp());
 
-        env.events().publish((symbol_short!("paused"),), reason);
+        events::emit_paused(&env, reason);
     }
 
     pub fn resume_group(env: Env, reason: soroban_sdk::String) {
@@ -1735,7 +1748,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
         env.storage().instance().remove(&DataKey::PauseReason);
         env.storage().instance().remove(&DataKey::PauseTimestamp);
 
-        env.events().publish((symbol_short!("resumed"),), reason);
+        events::emit_resumed(&env, reason);
     }
 
     pub fn is_paused(env: Env) -> bool {
@@ -1834,10 +1847,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             .instance()
             .set(&DataKey::ExitRequests, &requests);
 
-        env.events().publish(
-            (symbol_short!("exit_req"), member.clone()),
-            (current_round, refund_amount),
-        );
+        events::emit_exit_req(&env, member.clone(), current_round, refund_amount);
 
         env.storage()
             .instance()
@@ -1905,10 +1915,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             .instance()
             .set(&DataKey::ExitRequests, &requests);
 
-        env.events().publish(
-            (symbol_short!("exit_ok"), member.clone()),
-            request.refund_amount,
-        );
+        events::emit_exit_ok(&env, member.clone(), request.refund_amount);
 
         env.storage()
             .instance()
@@ -1938,8 +1945,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             .instance()
             .set(&DataKey::ExitRequests, &requests);
 
-        env.events()
-            .publish((symbol_short!("exit_no"), member.clone()), ());
+        events::emit_exit_no(&env, member.clone());
 
         env.storage()
             .instance()
@@ -2035,11 +2041,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             }
 
             if balance > 0 {
-                client.transfer(
-                    &env.current_contract_address(),
-                    &payout_recipient,
-                    &balance,
-                );
+                client.transfer(&env.current_contract_address(), &payout_recipient, &balance);
             }
         }
 
@@ -2056,9 +2058,11 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             .instance()
             .set(&DataKey::RoundHistory, &history);
 
-        env.events().publish(
-            (symbol_short!("rd_done"), current_round),
-            (payout_recipient, total_payout_history_amt),
+        events::emit_rd_done(
+            env,
+            current_round,
+            payout_recipient,
+            total_payout_history_amt,
         );
         Self::reset_round_state(env, current_round);
     }
@@ -2083,8 +2087,8 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             &DataKey::RoundDeadline,
             &(env.ledger().timestamp() + duration),
         );
-        env.events()
-            .publish((symbol_short!("reset"),), current_round);
+        events::emit_reset(env, current_round);
     }
 }
 mod test;
+pub use events::*;

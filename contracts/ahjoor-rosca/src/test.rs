@@ -3237,6 +3237,8 @@ fn test_admin_transfer_emits_events() {
     assert!(events.len() > 0);
 
     client.accept_admin_role();
+    assert_eq!(client.get_admin(), new_admin);
+    assert_eq!(client.get_proposed_admin(), None);
 
     let events = env.events().all();
     assert!(events.len() > 0);

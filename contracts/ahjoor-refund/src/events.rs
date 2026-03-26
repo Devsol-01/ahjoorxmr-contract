@@ -46,6 +46,21 @@ pub struct ContractUpgraded {
     pub old_version: u32,
     pub new_version: u32,
     pub by_admin: Address,
+/// Event: Contract paused
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractPaused {
+    pub admin: Address,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+/// Event: Contract resumed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractResumed {
+    pub admin: Address,
+    pub timestamp: u64,
 }
 
 // --- Helper Emission Functions ---
@@ -114,4 +129,16 @@ pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_ad
         by_admin,
     }
     .publish(e);
+}
+pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
+    ContractPaused {
+        admin,
+        reason,
+        timestamp,
+    }
+    .publish(e);
+}
+
+pub fn emit_contract_resumed(e: &Env, admin: Address, timestamp: u64) {
+    ContractResumed { admin, timestamp }.publish(e);
 }

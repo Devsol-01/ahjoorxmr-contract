@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, panic_with_error, token, Address, Env, Map, Symbol, Vec,
+    contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, Map,
+    Symbol, Vec,
 };
 
 // Instance storage: config, counters, and active round state (bounded, shared TTL)
@@ -163,6 +164,7 @@ pub enum DataKey {
     RewardDistType,      // DistributionType
     ExitedMembers,       // Vec<Address>
     ExitPenaltyBps,      // u32 (basis points, e.g. 1000 = 10%)
+    Paused,              // bool (global pause alias)
     IsPaused,            // bool
     PauseReason,         // String
     PauseTimestamp,      // u64
@@ -180,6 +182,8 @@ pub enum DataKey {
     QuorumPercentage,    // u32 (e.g., 51 for 51%)
     MemberContributions, // Map<Address, i128> cumulative per round
     ProposedAdmin,       // Address — proposed new admin (pending acceptance)
+    ContractVersion,     // u32
+    MigrationCompleted(u32), // bool
     // --- Persistent ---
     RoundHistory,        // Vec<PayoutRecord> — grows every round
     // --- Temporary ---
@@ -243,6 +247,7 @@ impl AhjoorContract {
         let member_count = members.len();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
         env.storage().instance().set(&DataKey::Members, &members);
         env.storage()
             .instance()
@@ -333,6 +338,7 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::ExitedMembers, &Vec::<Address>::new(&env));
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::IsPaused, &false);
         env.storage().instance().set(
             &DataKey::MemberContributions,
@@ -436,9 +442,90 @@ impl AhjoorContract {
             .expect("Not initialized")
     }
 
+    /// Upgrade this contract's WASM code. Admin only.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can upgrade contract");
+        }
+
+        let old_version = Self::get_or_init_version(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        let new_version = old_version.checked_add(1).expect("Version overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
+
+        events::emit_contract_upgraded(&env, old_version, new_version, admin);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Run one-time migration logic for the current version. Admin only.
+    pub fn migrate(env: Env, admin: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can migrate contract");
+        }
+
+        let version = Self::get_or_init_version(&env);
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationCompleted(version))
+            .unwrap_or(false)
+        {
+            panic!("Migration already completed for this version");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationCompleted(version), &true);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the current contract version.
+    pub fn get_version(env: Env) -> u32 {
+        Self::get_or_init_version(&env)
+    }
+
     /// Get the proposed admin address, if any.
     pub fn get_proposed_admin(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::ProposedAdmin)
+    }
+
+    fn get_or_init_version(env: &Env) -> u32 {
+        if let Some(version) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ContractVersion)
+        {
+            version
+        } else {
+            let initial_version = 1u32;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractVersion, &initial_version);
+            initial_version
+        }
     }
 
     pub fn contribute(env: Env, contributor: Address, token: Address, amount: i128) {
@@ -1736,6 +1823,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             panic_with_error!(&env, Error::AlreadyPaused);
         }
 
+        env.storage().instance().set(&DataKey::Paused, &true);
         env.storage().instance().set(&DataKey::IsPaused, &true);
         env.storage().instance().set(&DataKey::PauseReason, &reason);
         env.storage()
@@ -1778,6 +1866,7 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
             );
         }
 
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().set(&DataKey::IsPaused, &false);
 
         // Clean up Reason and Timestamp to save storage space
@@ -1790,8 +1879,42 @@ pub fn get_member_status(env: Env, member: Address) -> MemberStatus {
     pub fn is_paused(env: Env) -> bool {
         env.storage()
             .instance()
-            .get(&DataKey::IsPaused)
+            .get(&DataKey::Paused)
+            .or(env.storage().instance().get(&DataKey::IsPaused))
             .unwrap_or(false)
+    }
+
+    pub fn get_pause_reason(env: Env) -> soroban_sdk::String {
+        env.storage()
+            .instance()
+            .get(&DataKey::PauseReason)
+            .unwrap_or(soroban_sdk::String::from_str(&env, ""))
+    }
+
+    pub fn pause_contract(env: Env, admin: Address, reason: soroban_sdk::String) {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Only admin can pause contract");
+        }
+        admin.require_auth();
+        Self::pause_group(env, reason);
+    }
+
+    pub fn resume_contract(env: Env, admin: Address) {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic!("Only admin can resume contract");
+        }
+        admin.require_auth();
+        Self::resume_group(env.clone(), soroban_sdk::String::from_str(&env, "Resumed"));
     }
 
     pub fn get_pause_info(env: Env) -> (bool, soroban_sdk::String, u64) {

@@ -6,8 +6,11 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Events},
+    Address, BytesN, Env, String,
     Address, Env, String,
 };
+
+const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
 
 // ---------------------------------------------------------------------------
 //  Test Helpers
@@ -600,6 +603,99 @@ fn test_auth_required_for_admin_approve_refund() {
 
 #[test]
 fn test_event_snapshot_for_refund_request() {
+fn test_admin_upgrade_increments_version() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    assert_eq!(s.client.get_version(), 1);
+
+    let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    s.client.upgrade(&s.admin, &wasm_hash);
+
+    let version: u32 = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap()
+    });
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn test_upgrade_by_non_admin_fails() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let intruder = Address::generate(&s.env);
+    let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let result = s.client.try_upgrade(&intruder, &wasm_hash);
+
+    assert!(result.is_err());
+    assert_eq!(s.client.get_version(), 1);
+}
+
+#[test]
+fn test_migration_runs_once_per_version() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    s.client.migrate(&s.admin);
+    let second = s.client.try_migrate(&s.admin);
+
+    assert!(second.is_err());
+}
+
+#[test]
+fn test_upgrade_atomicity_with_invalid_hash() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let invalid_hash = BytesN::from_array(&s.env, &[9u8; 32]);
+    let result = s.client.try_upgrade(&s.admin, &invalid_hash);
+
+    assert!(result.is_err());
+    assert_eq!(s.client.get_version(), 1);
+// ===========================================================================
+//  Pause Mechanism Tests
+// ===========================================================================
+
+#[test]
+fn test_admin_can_pause_and_resume_contract() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let reason = String::from_str(&s.env, "Emergency maintenance");
+    s.client.pause_contract(&s.admin, &reason);
+
+    assert_eq!(s.client.is_paused(), true);
+    assert_eq!(s.client.get_pause_reason(), reason);
+
+    s.client.resume_contract(&s.admin);
+    assert_eq!(s.client.is_paused(), false);
+    assert_eq!(s.client.get_pause_reason(), String::from_str(&s.env, ""));
+}
+
+#[test]
+fn test_non_admin_cannot_pause_or_resume() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let attacker = Address::generate(&s.env);
+    let pause_res = s
+        .client
+        .try_pause_contract(&attacker, &String::from_str(&s.env, "Malicious"));
+    assert!(pause_res.is_err());
+
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "Incident"));
+
+    let resume_res = s.client.try_resume_contract(&attacker);
+    assert!(resume_res.is_err());
+}
+
+#[test]
+fn test_write_functions_blocked_when_paused_reads_still_work() {
     let s = setup();
     s.client.initialize(&s.admin);
 
@@ -659,4 +755,39 @@ proptest! {
 
         prop_assert!(total_refunded <= total_paid);
     }
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+
+    let request_res = s.client.try_request_refund(
+        &customer,
+        &100,
+        &s.token_addr,
+        &String::from_str(&s.env, "reason"),
+    );
+    assert!(request_res.is_err());
+
+    assert_eq!(s.client.get_refund_counter(), 0);
+    assert_eq!(s.client.get_admin(), s.admin);
+}
+
+#[test]
+fn test_recovery_after_resume() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+    s.client.resume_contract(&s.admin);
+
+    let refund_id = s.client.request_refund(
+        &customer,
+        &100,
+        &s.token_addr,
+        &String::from_str(&s.env, "post-resume"),
+    );
+
+    assert_eq!(refund_id, 0);
+    assert_eq!(s.client.get_refund_counter(), 1);
 }

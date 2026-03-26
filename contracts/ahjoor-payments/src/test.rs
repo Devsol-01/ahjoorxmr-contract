@@ -6,8 +6,10 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, String,
+    vec, Address, BytesN, Env, String,
 };
+
+const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
 
 // ---------------------------------------------------------------------------
 //  Test Helpers
@@ -1412,6 +1414,99 @@ fn test_auth_required_for_admin_complete_payment() {
 
 #[test]
 fn test_event_snapshot_for_payment_creation() {
+fn test_upgrade_increments_contract_version() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    assert_eq!(s.client.get_version(), 1);
+
+    let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    s.client.upgrade(&s.admin, &wasm_hash);
+
+    let version: u32 = s.env.as_contract(&s.client.address, || {
+        s.env
+            .storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap()
+    });
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn test_unauthorized_upgrade_rejected() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let intruder = Address::generate(&s.env);
+    let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
+
+    let result = s.client.try_upgrade(&intruder, &wasm_hash);
+    assert!(result.is_err());
+    assert_eq!(s.client.get_version(), 1);
+}
+
+#[test]
+fn test_migration_cannot_run_twice_for_same_version() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    s.client.migrate(&s.admin);
+    let second = s.client.try_migrate(&s.admin);
+
+    assert!(second.is_err());
+}
+
+#[test]
+fn test_upgrade_atomic_when_wasm_hash_invalid() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let invalid_hash = BytesN::from_array(&s.env, &[11u8; 32]);
+    let result = s.client.try_upgrade(&s.admin, &invalid_hash);
+
+    assert!(result.is_err());
+    assert_eq!(s.client.get_version(), 1);
+// ===========================================================================
+//  Pause Mechanism Tests
+// ===========================================================================
+
+#[test]
+fn test_admin_can_pause_and_resume_contract() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let reason = String::from_str(&s.env, "Emergency maintenance");
+    s.client.pause_contract(&s.admin, &reason);
+
+    assert_eq!(s.client.is_paused(), true);
+    assert_eq!(s.client.get_pause_reason(), reason);
+
+    s.client.resume_contract(&s.admin);
+    assert_eq!(s.client.is_paused(), false);
+    assert_eq!(s.client.get_pause_reason(), String::from_str(&s.env, ""));
+}
+
+#[test]
+fn test_non_admin_cannot_pause_or_resume() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let attacker = Address::generate(&s.env);
+    let pause_res = s
+        .client
+        .try_pause_contract(&attacker, &String::from_str(&s.env, "malicious"));
+    assert!(pause_res.is_err());
+
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "incident"));
+
+    let resume_res = s.client.try_resume_contract(&attacker);
+    assert!(resume_res.is_err());
+}
+
+#[test]
+fn test_write_functions_blocked_when_paused_reads_still_work() {
     let s = setup();
     s.client.initialize(&s.admin);
 
@@ -1430,6 +1525,20 @@ fn test_event_snapshot_for_payment_creation() {
 
 #[test]
 fn test_fuzz_like_payment_inputs_100_cases() {
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+
+    let create_res = s
+        .client
+        .try_create_payment(&customer, &merchant, &100, &s.token_addr);
+    assert!(create_res.is_err());
+
+    assert_eq!(s.client.get_payment_counter(), 0);
+    assert_eq!(s.client.get_admin(), s.admin);
+}
+
+#[test]
+fn test_recovery_after_resume() {
     let s = setup();
     s.client.initialize(&s.admin);
 
@@ -1487,4 +1596,15 @@ proptest! {
 
         prop_assert_eq!(sum_completed, settled_volume);
     }
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    s.client
+        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+    s.client.resume_contract(&s.admin);
+
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &200, &s.token_addr);
+    assert_eq!(payment_id, 0);
 }

@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, String,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, String,
 };
 
 // --- Storage TTL Constants ---
@@ -37,7 +37,11 @@ pub struct Refund {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    Paused,
+    PauseReason,
     RefundCounter,
+    ContractVersion,
+    MigrationCompleted(u32),
     Refund(u32),
 }
 
@@ -56,6 +60,7 @@ impl AhjoorRefundContract {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::RefundCounter, &0u32);
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
 
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
@@ -69,12 +74,14 @@ impl AhjoorRefundContract {
         token: Address,
         reason: String,
     ) -> u32 {
+        Self::require_not_paused(&env);
         customer.require_auth();
 
         if amount <= 0 {
             panic!("Refund amount must be positive");
         }
 
+        // Escrow funds to this contract so approved refunds can be processed.
         let client = token::Client::new(&env, &token);
         client.transfer(&customer, &env.current_contract_address(), &amount);
 
@@ -114,6 +121,7 @@ impl AhjoorRefundContract {
 
     /// Approve a refund request. Only admin can call this.
     pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -153,6 +161,7 @@ impl AhjoorRefundContract {
 
     /// Reject a refund request. Only admin can call this.
     pub fn reject_refund(env: Env, admin: Address, refund_id: u32, rejection_reason: String) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -191,6 +200,7 @@ impl AhjoorRefundContract {
 
     /// Process an approved refund. Transfers tokens to customer. Only admin can call this.
     pub fn process_refund(env: Env, admin: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -259,7 +269,121 @@ impl AhjoorRefundContract {
             .expect("Not initialized")
     }
 
+    /// Upgrade this contract's WASM code. Admin only.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can upgrade contract");
+        }
+
+        let old_version = Self::get_or_init_version(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        let new_version = old_version.checked_add(1).expect("Version overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
+
+        events::emit_contract_upgraded(&env, old_version, new_version, admin);
+
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Run one-time migration logic for the current version. Admin only.
+    pub fn migrate(env: Env, admin: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can migrate contract");
+        }
+
+        let version = Self::get_or_init_version(&env);
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationCompleted(version))
+            .unwrap_or(false)
+        {
+            panic!("Migration already completed for this version");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationCompleted(version), &true);
+
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the current contract version.
+    pub fn get_version(env: Env) -> u32 {
+        Self::get_or_init_version(&env)
+    pub fn pause_contract(env: Env, admin: Address, reason: String) {
+        Self::require_admin(&env, &admin);
+
+        if Self::is_paused(env.clone()) {
+            panic!("Contract already paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::PauseReason, &reason);
+
+        events::emit_contract_paused(&env, admin, reason, env.ledger().timestamp());
+    }
+
+    pub fn resume_contract(env: Env, admin: Address) {
+        Self::require_admin(&env, &admin);
+
+        if !Self::is_paused(env.clone()) {
+            panic!("Contract is not paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PauseReason);
+
+        events::emit_contract_resumed(&env, admin, env.ledger().timestamp());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    pub fn get_pause_reason(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::PauseReason)
+            .unwrap_or(String::from_str(&env, ""))
+    }
+
     // --- Internal Helpers ---
+
+    fn require_not_paused(env: &Env) {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            panic!("Contract is paused");
+        }
+    }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != *admin {
+            panic!("Only admin can manage pause state");
+        }
+    }
 
     fn next_refund_id(env: &Env) -> u32 {
         let mut counter: u32 = env
@@ -271,6 +395,22 @@ impl AhjoorRefundContract {
         counter += 1;
         env.storage().instance().set(&DataKey::RefundCounter, &counter);
         id
+    }
+
+    fn get_or_init_version(env: &Env) -> u32 {
+        if let Some(version) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ContractVersion)
+        {
+            version
+        } else {
+            let initial_version = 1u32;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractVersion, &initial_version);
+            initial_version
+        }
     }
 }
 

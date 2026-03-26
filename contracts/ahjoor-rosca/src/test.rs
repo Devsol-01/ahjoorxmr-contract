@@ -7,8 +7,10 @@ use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, IntoVal, Symbol,
+    vec, Address, BytesN, Env, IntoVal, Symbol,
 };
+
+const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
 
 /// Shared test context for ROSCA contract tests.
 pub struct TestSetup<'a> {
@@ -25,6 +27,7 @@ pub struct TestSetup<'a> {
     /// tests that use the members-oriented helpers.
     #[allow(dead_code)]
     pub member_token_admin: TokenAdminClient<'a>,
+    pub _member_token_admin: TokenAdminClient<'a>,
 }
 
 /// Minimal setup (no members, no minting). Used by tests that manage their own
@@ -52,7 +55,7 @@ fn setup_env<'a>() -> TestSetup<'a> {
         token_client,
         token_admin_client,
         members: soroban_sdk::Vec::new(&Env::default()),
-        member_token_admin,
+        _member_token_admin: member_token_admin,
     }
 }
 
@@ -97,7 +100,7 @@ fn setup_with_members<'a>(n: usize, mint_amount: i128) -> TestSetup<'a> {
         token_client,
         token_admin_client,
         members,
-        member_token_admin,
+        _member_token_admin: member_token_admin,
     }
 }
 
@@ -3237,6 +3240,8 @@ fn test_admin_transfer_emits_events() {
     assert!(events.len() > 0);
 
     client.accept_admin_role();
+    assert_eq!(client.get_admin(), new_admin);
+    assert_eq!(client.get_proposed_admin(), None);
 
     let events = env.events().all();
     assert!(events.len() > 0);
@@ -3333,4 +3338,56 @@ proptest! {
         prop_assert_eq!(payout_amount, total_collected);
         prop_assert!(payout_amount >= 0);
     }
+fn test_upgrade_increments_contract_version() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    assert_eq!(client.get_version(), 1);
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    client.upgrade(&admin, &wasm_hash);
+
+    let version: u32 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap()
+    });
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn test_upgrade_by_non_admin_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    let intruder = Address::generate(&env);
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let result = client.try_upgrade(&intruder, &wasm_hash);
+
+    assert!(result.is_err());
+    assert_eq!(client.get_version(), 1);
+}
+
+#[test]
+fn test_migration_is_once_per_version() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    client.migrate(&admin);
+    let second = client.try_migrate(&admin);
+
+    assert!(second.is_err());
+}
+
+#[test]
+fn test_upgrade_atomicity_invalid_hash() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    let invalid_hash = BytesN::from_array(&env, &[3u8; 32]);
+    let result = client.try_upgrade(&admin, &invalid_hash);
+
+    assert!(result.is_err());
+    assert_eq!(client.get_version(), 1);
 }

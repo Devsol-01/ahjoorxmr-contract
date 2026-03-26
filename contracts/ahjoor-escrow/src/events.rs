@@ -49,6 +49,47 @@ pub struct EscrowRefunded {
     pub amount: i128,
 }
 
+/// Event: Contract WASM upgraded
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub old_version: u32,
+    pub new_version: u32,
+    pub by_admin: Address,
+/// Event: Deadline extension proposed by a participant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DeadlineExtensionProposed {
+    pub escrow_id: u32,
+    pub proposer: Address,
+    pub new_deadline: u64,
+    pub proposed_at: u64,
+}
+
+/// Event: Deadline updated after counterparty acceptance
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DeadlineExtended {
+    pub escrow_id: u32,
+    pub old_deadline: u64,
+    pub new_deadline: u64,
+/// Event: Contract paused
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractPaused {
+    pub admin: Address,
+    pub reason: String,
+    pub timestamp: u64,
+}
+
+/// Event: Contract resumed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractResumed {
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_escrow_created(
@@ -107,4 +148,44 @@ pub fn emit_escrow_refunded(e: &Env, escrow_id: u32, buyer: Address, amount: i12
         amount,
     }
     .publish(e);
+}
+
+pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_admin: Address) {
+    ContractUpgraded {
+        old_version,
+        new_version,
+        by_admin,
+    }
+    .publish(e);
+}
+pub fn emit_deadline_extension_proposed(
+    e: &Env,
+    escrow_id: u32,
+    proposer: Address,
+    new_deadline: u64,
+    proposed_at: u64,
+) {
+    DeadlineExtensionProposed {
+        escrow_id,
+        proposer,
+        new_deadline,
+        proposed_at,
+pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
+    ContractPaused {
+        admin,
+        reason,
+        timestamp,
+    }
+    .publish(e);
+}
+
+pub fn emit_deadline_extended(e: &Env, escrow_id: u32, old_deadline: u64, new_deadline: u64) {
+    DeadlineExtended {
+        escrow_id,
+        old_deadline,
+        new_deadline,
+    }
+    .publish(e);
+pub fn emit_contract_resumed(e: &Env, admin: Address, timestamp: u64) {
+    ContractResumed { admin, timestamp }.publish(e);
 }

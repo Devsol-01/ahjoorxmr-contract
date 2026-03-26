@@ -80,12 +80,9 @@ fn test_create_single_payment_escrow() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(
-        &customer,
-        &merchant,
-        &250,
-        &s.token_addr,
-    );
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
 
     assert_eq!(payment_id, 0);
     assert_eq!(s.token_client.balance(&customer), 750);
@@ -107,7 +104,9 @@ fn test_complete_payment_releases_to_merchant() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
     s.client.complete_payment(&payment_id);
 
     assert_eq!(s.token_client.balance(&merchant), 250);
@@ -127,7 +126,9 @@ fn test_complete_already_completed_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
     s.client.complete_payment(&payment_id);
     s.client.complete_payment(&payment_id);
 }
@@ -140,7 +141,8 @@ fn test_create_payment_zero_amount_panics() {
 
     let customer = Address::generate(&s.env);
     let merchant = Address::generate(&s.env);
-    s.client.create_payment(&customer, &merchant, &0, &s.token_addr);
+    s.client
+        .create_payment(&customer, &merchant, &0, &s.token_addr);
 }
 
 // ===========================================================================
@@ -197,9 +199,21 @@ fn test_batch_exceeds_max_size() {
 
     let requests = vec![
         &s.env,
-        PaymentRequest { merchant: Address::generate(&s.env), amount: 10, token: s.token_addr.clone() },
-        PaymentRequest { merchant: Address::generate(&s.env), amount: 10, token: s.token_addr.clone() },
-        PaymentRequest { merchant: Address::generate(&s.env), amount: 10, token: s.token_addr.clone() },
+        PaymentRequest {
+            merchant: Address::generate(&s.env),
+            amount: 10,
+            token: s.token_addr.clone(),
+        },
+        PaymentRequest {
+            merchant: Address::generate(&s.env),
+            amount: 10,
+            token: s.token_addr.clone(),
+        },
+        PaymentRequest {
+            merchant: Address::generate(&s.env),
+            amount: 10,
+            token: s.token_addr.clone(),
+        },
     ];
     s.client.create_payments_batch(&customer, &requests);
 }
@@ -216,8 +230,16 @@ fn test_batch_insufficient_funds_reverts_all() {
 
     let requests = vec![
         &s.env,
-        PaymentRequest { merchant: merchant1.clone(), amount: 100, token: s.token_addr.clone() },
-        PaymentRequest { merchant: merchant2.clone(), amount: 200, token: s.token_addr.clone() },
+        PaymentRequest {
+            merchant: merchant1.clone(),
+            amount: 100,
+            token: s.token_addr.clone(),
+        },
+        PaymentRequest {
+            merchant: merchant2.clone(),
+            amount: 200,
+            token: s.token_addr.clone(),
+        },
     ];
 
     let result = s.client.try_create_payments_batch(&customer, &requests);
@@ -240,7 +262,9 @@ fn test_dispute_pending_payment() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &500, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &500, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Wrong item delivered");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -266,7 +290,9 @@ fn test_dispute_completed_payment_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
     s.client.complete_payment(&payment_id);
 
     let reason = String::from_str(&s.env, "Too late");
@@ -283,7 +309,9 @@ fn test_dispute_already_disputed_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Issue 1");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -303,7 +331,9 @@ fn test_dispute_non_customer_panics() {
     let stranger = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Not my payment");
     s.client.dispute_payment(&stranger, &payment_id, &reason);
@@ -319,7 +349,9 @@ fn test_complete_disputed_payment_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Dispute this");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -340,7 +372,9 @@ fn test_resolve_dispute_to_merchant() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &300, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &300, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Quality issue");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -365,7 +399,9 @@ fn test_resolve_dispute_to_customer() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &300, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &300, &s.token_addr);
     assert_eq!(s.token_client.balance(&customer), 700);
 
     let reason = String::from_str(&s.env, "Never received item");
@@ -393,7 +429,9 @@ fn test_resolve_non_disputed_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
     s.client.resolve_dispute(&payment_id, &true);
 }
 
@@ -411,7 +449,9 @@ fn test_dispute_escalation_after_timeout() {
     s.token_admin_client.mint(&customer, &1000);
 
     s.env.ledger().set_timestamp(1000);
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     s.env.ledger().set_timestamp(2000);
     let reason = String::from_str(&s.env, "Test dispute");
@@ -437,7 +477,9 @@ fn test_no_escalation_for_non_disputed() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let escalated = s.client.check_escalation(&payment_id);
     assert!(!escalated);
@@ -453,7 +495,9 @@ fn test_no_escalation_after_resolved() {
     s.token_admin_client.mint(&customer, &1000);
 
     s.env.ledger().set_timestamp(1000);
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Dispute");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -509,7 +553,9 @@ fn test_is_disputed() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
     assert!(!s.client.is_disputed(&payment_id));
 
     let reason = String::from_str(&s.env, "Dispute");
@@ -528,12 +574,21 @@ fn test_customer_payment_tracking() {
     let customer = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &10000);
 
-    s.client.create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
 
     let requests = vec![
         &s.env,
-        PaymentRequest { merchant: Address::generate(&s.env), amount: 200, token: s.token_addr.clone() },
-        PaymentRequest { merchant: Address::generate(&s.env), amount: 300, token: s.token_addr.clone() },
+        PaymentRequest {
+            merchant: Address::generate(&s.env),
+            amount: 200,
+            token: s.token_addr.clone(),
+        },
+        PaymentRequest {
+            merchant: Address::generate(&s.env),
+            amount: 300,
+            token: s.token_addr.clone(),
+        },
     ];
     s.client.create_payments_batch(&customer, &requests);
 
@@ -564,7 +619,9 @@ fn test_full_dispute_lifecycle() {
     s.token_admin_client.mint(&customer, &1000);
 
     s.env.ledger().set_timestamp(100);
-    let pid = s.client.create_payment(&customer, &merchant, &500, &s.token_addr);
+    let pid = s
+        .client
+        .create_payment(&customer, &merchant, &500, &s.token_addr);
     assert_eq!(s.client.get_payment(&pid).status, PaymentStatus::Pending);
     assert_eq!(s.token_client.balance(&s.client.address), 500);
 
@@ -605,7 +662,8 @@ fn test_dispute_emits_events() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Bad service");
     s.client.dispute_payment(&customer, &0, &reason);
@@ -623,14 +681,18 @@ fn test_resolve_emits_events() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Dispute reason");
     s.client.dispute_payment(&customer, &0, &reason);
     s.client.resolve_dispute(&0, &true);
 
     let events = s.env.events().all();
-    assert!(events.len() >= 3, "Expected multiple events for full dispute lifecycle");
+    assert!(
+        events.len() >= 3,
+        "Expected multiple events for full dispute lifecycle"
+    );
 }
 
 // ===========================================================================
@@ -649,12 +711,14 @@ fn test_payment_persistent_ttl_extended_on_create() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
 
     // Advance ledger sequence past instance TTL threshold
-    s.env.ledger().set_sequence_number(
-        s.env.ledger().sequence() + 110_000,
-    );
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 110_000);
 
     // Payment record must still be accessible (persistent storage, individual TTL)
     let payment = s.client.get_payment(&payment_id);
@@ -673,12 +737,14 @@ fn test_payment_persistent_ttl_extended_on_complete() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &100, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &100, &s.token_addr);
     s.client.complete_payment(&payment_id);
 
-    s.env.ledger().set_sequence_number(
-        s.env.ledger().sequence() + 110_000,
-    );
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 110_000);
 
     let payment = s.client.get_payment(&payment_id);
     assert_eq!(payment.status, PaymentStatus::Completed);
@@ -695,7 +761,9 @@ fn test_dispute_temporary_storage_lifecycle() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &200, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &200, &s.token_addr);
 
     let reason = String::from_str(&s.env, "Item not received");
     s.client.dispute_payment(&customer, &payment_id, &reason);
@@ -721,13 +789,16 @@ fn test_customer_payments_persistent_ttl() {
     let customer = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &5000);
 
-    s.client.create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
-    s.client.create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
-    s.client.create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
+    s.client
+        .create_payment(&customer, &Address::generate(&s.env), &100, &s.token_addr);
 
-    s.env.ledger().set_sequence_number(
-        s.env.ledger().sequence() + 110_000,
-    );
+    s.env
+        .ledger()
+        .set_sequence_number(s.env.ledger().sequence() + 110_000);
 
     // Customer index must still be accessible after ledger advancement
     let ids = s.client.get_customer_payments(&customer);
@@ -741,8 +812,8 @@ fn test_customer_payments_persistent_ttl() {
 /// Mock oracle contract used in tests.
 /// Stores a single price (scaled by 10^7) and timestamp set by the test.
 mod mock_oracle {
-    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
     use crate::PriceData;
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
 
     #[contracttype]
     enum OracleKey {
@@ -798,12 +869,16 @@ fn setup_multi_token<'a>() -> MultiTokenSetup<'a> {
     let admin = Address::generate(&env);
 
     // USDC token
-    let usdc_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let usdc_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let usdc_client = TokenClient::new(&env, &usdc_addr);
     let usdc_admin = TokenAdminClient::new(&env, &usdc_addr);
 
     // XLM-like payment token
-    let xlm_addr = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let xlm_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     let xlm_admin = TokenAdminClient::new(&env, &xlm_addr);
     let xlm_client = TokenClient::new(&env, &xlm_addr);
 
@@ -847,9 +922,9 @@ fn test_multi_token_usdc_fallback() {
     let merchant = Address::generate(&s.env);
     s.usdc_admin.mint(&customer, &1000);
 
-    let pid = s.client.create_payment_multi_token(
-        &customer, &merchant, &500, &s.usdc_addr, &50,
-    );
+    let pid = s
+        .client
+        .create_payment_multi_token(&customer, &merchant, &500, &s.usdc_addr, &50);
 
     // Funds escrowed in contract
     assert_eq!(s.usdc_client.balance(&customer), 500);
@@ -875,9 +950,9 @@ fn test_multi_token_xlm_payment_correct_amount() {
     // Customer needs 1000 XLM for 100 USDC
     s.xlm_admin.mint(&customer, &2000);
 
-    let pid = s.client.create_payment_multi_token(
-        &customer, &merchant, &100, &s.xlm_addr, &50,
-    );
+    let pid = s
+        .client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
 
     // required_token_amount = 100 * 10_000_000 / 1_000_000 = 1000
     assert_eq!(s.xlm_client.balance(&customer), 1000);
@@ -903,9 +978,8 @@ fn test_multi_token_different_rate() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &500);
 
-    s.client.create_payment_multi_token(
-        &customer, &merchant, &50, &s.xlm_addr, &100,
-    );
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &50, &s.xlm_addr, &100);
 
     // required = 50 * 10_000_000 / 5_000_000 = 100
     assert_eq!(s.xlm_client.balance(&customer), 400);
@@ -928,9 +1002,8 @@ fn test_multi_token_stale_oracle_rejected() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &2000);
 
-    s.client.create_payment_multi_token(
-        &customer, &merchant, &100, &s.xlm_addr, &50,
-    );
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
 }
 
 /// Unavailable oracle (no price set) must be rejected.
@@ -944,9 +1017,8 @@ fn test_multi_token_oracle_unavailable() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &2000);
 
-    s.client.create_payment_multi_token(
-        &customer, &merchant, &100, &s.xlm_addr, &50,
-    );
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
 }
 
 /// Zero slippage tolerance: exact integer division must not deviate.
@@ -962,9 +1034,8 @@ fn test_multi_token_zero_slippage_exact_rate() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &500);
 
-    s.client.create_payment_multi_token(
-        &customer, &merchant, &200, &s.xlm_addr, &0,
-    );
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &200, &s.xlm_addr, &0);
 
     // required = 200 * 10_000_000 / 10_000_000 = 200 — no deviation
     assert_eq!(s.xlm_client.balance(&s.client.address), 200);
@@ -1006,9 +1077,8 @@ fn test_multi_token_emits_event() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &2000);
 
-    s.client.create_payment_multi_token(
-        &customer, &merchant, &100, &s.xlm_addr, &50,
-    );
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
 
     let events = s.env.events().all();
     assert!(events.len() > 0);
@@ -1024,8 +1094,10 @@ fn test_multi_token_payment_counter() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &5000);
 
-    s.client.create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
-    s.client.create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
 
     assert_eq!(s.client.get_payment_counter(), 2);
 }
@@ -1040,8 +1112,10 @@ fn test_multi_token_customer_tracking() {
     let merchant = Address::generate(&s.env);
     s.xlm_admin.mint(&customer, &5000);
 
-    s.client.create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
-    s.client.create_payment_multi_token(&customer, &merchant, &200, &s.xlm_addr, &50);
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &100, &s.xlm_addr, &50);
+    s.client
+        .create_payment_multi_token(&customer, &merchant, &200, &s.xlm_addr, &50);
 
     let ids = s.client.get_customer_payments(&customer);
     assert_eq!(ids.len(), 2);
@@ -1064,7 +1138,8 @@ fn test_token_transfer_on_payment_creation() {
     let initial_balance = s.token_client.balance(&customer);
     assert_eq!(initial_balance, 1000);
 
-    s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
+    s.client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
 
     let final_balance = s.token_client.balance(&customer);
     assert_eq!(final_balance, 750);
@@ -1080,7 +1155,8 @@ fn test_contract_holds_escrow() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
+    s.client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
 
     let contract_balance = s.token_client.balance(&s.client.address);
     assert_eq!(contract_balance, 250);
@@ -1096,7 +1172,9 @@ fn test_token_transfer_on_payment_completion() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
     s.client.complete_payment(&payment_id);
 
     let merchant_balance = s.token_client.balance(&merchant);
@@ -1116,7 +1194,14 @@ fn test_token_transfer_on_refund() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
+    s.client.dispute_payment(
+        &customer,
+        &payment_id,
+        &String::from_str(&s.env, "test refund"),
+    );
     s.client.resolve_dispute(&payment_id, &false); // Release to customer
 
     let customer_balance = s.token_client.balance(&customer);
@@ -1170,8 +1255,14 @@ fn test_token_transfer_on_dispute_resolution_to_merchant() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment_id = s.client.create_payment(&customer, &merchant, &250, &s.token_addr);
-    s.client.dispute_payment(&customer, &payment_id, &String::from_str(&s.env, "Item not received"));
+    let payment_id = s
+        .client
+        .create_payment(&customer, &merchant, &250, &s.token_addr);
+    s.client.dispute_payment(
+        &customer,
+        &payment_id,
+        &String::from_str(&s.env, "Item not received"),
+    );
     s.client.resolve_dispute(&payment_id, &true); // Release to merchant
 
     let merchant_balance = s.token_client.balance(&merchant);
@@ -1191,8 +1282,12 @@ fn test_token_balance_tracking_multiple_payments() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let payment1 = s.client.create_payment(&customer, &merchant, &200, &s.token_addr);
-    let payment2 = s.client.create_payment(&customer, &merchant, &300, &s.token_addr);
+    let payment1 = s
+        .client
+        .create_payment(&customer, &merchant, &200, &s.token_addr);
+    let payment2 = s
+        .client
+        .create_payment(&customer, &merchant, &300, &s.token_addr);
 
     let customer_balance = s.token_client.balance(&customer);
     assert_eq!(customer_balance, 500);

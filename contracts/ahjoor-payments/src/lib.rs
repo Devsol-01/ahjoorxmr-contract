@@ -1,7 +1,5 @@
 #![no_std]
-use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, String, Vec,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
 // Reflector-compatible oracle interface.
@@ -19,8 +17,8 @@ pub struct PriceData {
 
 /// Minimal oracle client — only the method we need.
 mod oracle {
-    use soroban_sdk::{contractclient, Address, Env};
     use crate::PriceData;
+    use soroban_sdk::{contractclient, Address, Env};
 
     #[contractclient(name = "OracleClient")]
     pub trait OracleInterface {
@@ -55,6 +53,7 @@ pub enum PaymentStatus {
     Completed = 1,
     Refunded = 2,
     Disputed = 3,
+    Expired = 4,
 }
 
 #[contracttype]
@@ -67,6 +66,10 @@ pub struct Payment {
     pub token: Address,
     pub status: PaymentStatus,
     pub created_at: u64,
+    /// Ledger timestamp after which the payment can be expired. 0 = no expiry.
+    pub expires_at: u64,
+    /// Cumulative amount refunded via partial refunds.
+    pub refunded_amount: i128,
 }
 
 #[contracttype]
@@ -84,6 +87,24 @@ pub struct Dispute {
     pub reason: String,
     pub created_at: u64,
     pub resolved: bool,
+}
+
+/// Default payment timeout: 7 days in seconds.
+const DEFAULT_PAYMENT_TIMEOUT: u64 = 7 * 24 * 60 * 60;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Subscription {
+    pub id: u32,
+    pub subscriber: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub interval_seconds: u64,
+    pub last_charged_at: u64,
+    pub max_charges: u32,
+    pub charges_count: u32,
+    pub active: bool,
 }
 
 /// Storage key classification:
@@ -110,9 +131,19 @@ pub enum DataKey {
     MaxOracleAge,
     /// Proposed new admin address (pending acceptance)
     ProposedAdmin,
+    /// Global payment timeout in seconds (default: 7 days)
+    PaymentTimeout,
+    /// When true, merchant allowlist is bypassed (open mode)
+    MerchantOpenMode,
+    /// Subscription counter
+    SubscriptionCounter,
     // --- Persistent ---
     Payment(u32),
     CustomerPayments(Address),
+    /// Merchant approval status (true = approved)
+    MerchantApproved(Address),
+    /// Subscription record
+    Subscription(u32),
     // --- Temporary ---
     Dispute(u32),
 }
@@ -133,15 +164,25 @@ impl AhjoorPaymentsContract {
 
         // Instance: config and counters
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::PaymentCounter, &0u32);
-        env.storage().instance().set(&DataKey::MaxBatchSize, &DEFAULT_MAX_BATCH_SIZE);
-        env.storage().instance().set(&DataKey::DisputeTimeout, &DEFAULT_DISPUTE_TIMEOUT);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentCounter, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxBatchSize, &DEFAULT_MAX_BATCH_SIZE);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeTimeout, &DEFAULT_DISPUTE_TIMEOUT);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Create a single payment: transfer tokens from customer to contract (escrow).
     /// Payment record stored in persistent storage with individual TTL.
+    /// Rejects unapproved merchants unless open mode is enabled (#58).
+    /// Sets expiry based on global payment timeout (#54).
     /// Returns the new payment ID.
     pub fn create_payment(
         env: Env,
@@ -156,8 +197,18 @@ impl AhjoorPaymentsContract {
             panic!("Payment amount must be positive");
         }
 
+        // Merchant allowlist check (#58)
+        Self::require_merchant_approved(&env, &merchant);
+
         let client = token::Client::new(&env, &token);
         client.transfer(&customer, &env.current_contract_address(), &amount);
+
+        let timeout: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentTimeout)
+            .unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+        let now = env.ledger().timestamp();
 
         let payment_id = Self::next_payment_id(&env);
         let payment = Payment {
@@ -167,11 +218,15 @@ impl AhjoorPaymentsContract {
             amount,
             token: token.clone(),
             status: PaymentStatus::Pending,
-            created_at: env.ledger().timestamp(),
+            created_at: now,
+            expires_at: now + timeout,
+            refunded_amount: 0,
         };
 
         // Persistent: per-payment record with individual TTL
-        env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
         env.storage().persistent().extend_ttl(
             &DataKey::Payment(payment_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -182,7 +237,9 @@ impl AhjoorPaymentsContract {
 
         events::emit_payment_created(&env, payment_id, customer, merchant, amount, token);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         payment_id
     }
@@ -214,10 +271,19 @@ impl AhjoorPaymentsContract {
         let mut payment_ids = Vec::new(&env);
         let mut total_amount: i128 = 0;
 
+        let timeout: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentTimeout)
+            .unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+        let now = env.ledger().timestamp();
+
         for request in payments.iter() {
             if request.amount <= 0 {
                 panic!("Payment amount must be positive");
             }
+
+            Self::require_merchant_approved(&env, &request.merchant);
 
             let client = token::Client::new(&env, &request.token);
             client.transfer(&customer, &env.current_contract_address(), &request.amount);
@@ -230,11 +296,15 @@ impl AhjoorPaymentsContract {
                 amount: request.amount,
                 token: request.token.clone(),
                 status: PaymentStatus::Pending,
-                created_at: env.ledger().timestamp(),
+                created_at: now,
+                expires_at: now + timeout,
+                refunded_amount: 0,
             };
 
             // Persistent: per-payment record with individual TTL
-            env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Payment(payment_id), &payment);
             env.storage().persistent().extend_ttl(
                 &DataKey::Payment(payment_id),
                 PERSISTENT_LIFETIME_THRESHOLD,
@@ -258,7 +328,9 @@ impl AhjoorPaymentsContract {
 
         events::emit_batch_payment_created(&env, customer, batch_len, total_amount);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         payment_ids
     }
@@ -282,14 +354,25 @@ impl AhjoorPaymentsContract {
             panic!("Payment is not pending");
         }
 
+        // Reject if payment has expired (#54)
+        if payment.expires_at > 0 && env.ledger().timestamp() >= payment.expires_at {
+            panic!("Payment has expired");
+        }
+
         let client = token::Client::new(&env, &payment.token);
-        client.transfer(&env.current_contract_address(), &payment.merchant, &payment.amount);
+        client.transfer(
+            &env.current_contract_address(),
+            &payment.merchant,
+            &payment.amount,
+        );
 
         let old_status = payment.status;
         payment.status = PaymentStatus::Completed;
 
         // Extend TTL on update so completed records survive long-term
-        env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
         env.storage().persistent().extend_ttl(
             &DataKey::Payment(payment_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -299,7 +382,9 @@ impl AhjoorPaymentsContract {
         events::emit_payment_completed(&env, payment_id, payment.merchant, payment.amount);
         events::emit_payment_status_changed(&env, payment_id, old_status, PaymentStatus::Completed);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     // --- Dispute Methods ---
@@ -326,7 +411,9 @@ impl AhjoorPaymentsContract {
         let old_status = payment.status;
         payment.status = PaymentStatus::Disputed;
 
-        env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
         env.storage().persistent().extend_ttl(
             &DataKey::Payment(payment_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -340,7 +427,9 @@ impl AhjoorPaymentsContract {
             created_at: env.ledger().timestamp(),
             resolved: false,
         };
-        env.storage().temporary().set(&DataKey::Dispute(payment_id), &dispute);
+        env.storage()
+            .temporary()
+            .set(&DataKey::Dispute(payment_id), &dispute);
         env.storage().temporary().extend_ttl(
             &DataKey::Dispute(payment_id),
             TEMP_LIFETIME_THRESHOLD,
@@ -350,7 +439,9 @@ impl AhjoorPaymentsContract {
         events::emit_payment_disputed(&env, payment_id, customer, reason);
         events::emit_payment_status_changed(&env, payment_id, old_status, PaymentStatus::Disputed);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Admin resolves a dispute. Clears temporary dispute state on resolution.
@@ -376,14 +467,24 @@ impl AhjoorPaymentsContract {
         let old_status = payment.status;
 
         if release_to_merchant {
-            client.transfer(&env.current_contract_address(), &payment.merchant, &payment.amount);
+            client.transfer(
+                &env.current_contract_address(),
+                &payment.merchant,
+                &payment.amount,
+            );
             payment.status = PaymentStatus::Completed;
         } else {
-            client.transfer(&env.current_contract_address(), &payment.customer, &payment.amount);
+            client.transfer(
+                &env.current_contract_address(),
+                &payment.customer,
+                &payment.amount,
+            );
             payment.status = PaymentStatus::Refunded;
         }
 
-        env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
         env.storage().persistent().extend_ttl(
             &DataKey::Payment(payment_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -397,14 +498,18 @@ impl AhjoorPaymentsContract {
             .get::<DataKey, Dispute>(&DataKey::Dispute(payment_id))
         {
             dispute.resolved = true;
-            env.storage().temporary().set(&DataKey::Dispute(payment_id), &dispute);
+            env.storage()
+                .temporary()
+                .set(&DataKey::Dispute(payment_id), &dispute);
             // No TTL extension — resolved disputes can expire on their own
         }
 
         events::emit_dispute_resolved(&env, payment_id, release_to_merchant, admin);
         events::emit_payment_status_changed(&env, payment_id, old_status, payment.status);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Check if a dispute has exceeded the timeout window.
@@ -448,12 +553,7 @@ impl AhjoorPaymentsContract {
 
     /// Admin sets the oracle contract address, USDC token address, and max
     /// oracle price age. Must be called before create_payment_multi_token.
-    pub fn set_oracle(
-        env: Env,
-        oracle: Address,
-        usdc_token: Address,
-        max_oracle_age: u64,
-    ) {
+    pub fn set_oracle(env: Env, oracle: Address, usdc_token: Address, max_oracle_age: u64) {
         let admin: Address = env
             .storage()
             .instance()
@@ -465,10 +565,18 @@ impl AhjoorPaymentsContract {
             panic!("max_oracle_age must be positive");
         }
 
-        env.storage().instance().set(&DataKey::OracleAddress, &oracle);
-        env.storage().instance().set(&DataKey::UsdcToken, &usdc_token);
-        env.storage().instance().set(&DataKey::MaxOracleAge, &max_oracle_age);
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&DataKey::OracleAddress, &oracle);
+        env.storage()
+            .instance()
+            .set(&DataKey::UsdcToken, &usdc_token);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOracleAge, &max_oracle_age);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Create a payment where the customer pays in any supported token.
@@ -570,9 +678,19 @@ impl AhjoorPaymentsContract {
 
         // --- Transfer payment_token from customer to contract (escrow) ---
         let pay_client = token::Client::new(&env, &payment_token);
-        pay_client.transfer(&customer, &env.current_contract_address(), &required_token_amount);
+        pay_client.transfer(
+            &customer,
+            &env.current_contract_address(),
+            &required_token_amount,
+        );
 
         // --- Record payment in USDC terms so complete_payment releases USDC ---
+        let timeout: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentTimeout)
+            .unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+        let now = env.ledger().timestamp();
         let payment_id = Self::next_payment_id(&env);
         let payment = Payment {
             id: payment_id,
@@ -581,10 +699,14 @@ impl AhjoorPaymentsContract {
             amount: amount_usdc,
             token: usdc_token.clone(),
             status: PaymentStatus::Pending,
-            created_at: env.ledger().timestamp(),
+            created_at: now,
+            expires_at: now + timeout,
+            refunded_amount: 0,
         };
 
-        env.storage().persistent().set(&DataKey::Payment(payment_id), &payment);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
         env.storage().persistent().extend_ttl(
             &DataKey::Payment(payment_id),
             PERSISTENT_LIFETIME_THRESHOLD,
@@ -604,7 +726,9 @@ impl AhjoorPaymentsContract {
             price_data.price,
         );
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         payment_id
     }
@@ -644,7 +768,9 @@ impl AhjoorPaymentsContract {
             panic!("Max batch size must be at least 1");
         }
 
-        env.storage().instance().set(&DataKey::MaxBatchSize, &new_size);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxBatchSize, &new_size);
     }
 
     pub fn set_dispute_timeout(env: Env, timeout: u64) {
@@ -659,7 +785,9 @@ impl AhjoorPaymentsContract {
             panic!("Dispute timeout must be positive");
         }
 
-        env.storage().instance().set(&DataKey::DisputeTimeout, &timeout);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeTimeout, &timeout);
     }
 
     /// Propose a new admin address. Only the current admin can propose.
@@ -677,7 +805,9 @@ impl AhjoorPaymentsContract {
 
         events::emit_admin_transfer_proposed(&env, admin, proposed_admin);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Accept the admin role. Only the proposed admin can accept.
@@ -695,12 +825,16 @@ impl AhjoorPaymentsContract {
             .get(&DataKey::Admin)
             .expect("Not initialized");
 
-        env.storage().instance().set(&DataKey::Admin, &proposed_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &proposed_admin);
         env.storage().instance().remove(&DataKey::ProposedAdmin);
 
         events::emit_admin_transferred(&env, old_admin, proposed_admin);
 
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Get the current admin address.
@@ -733,11 +867,17 @@ impl AhjoorPaymentsContract {
     }
 
     pub fn get_payment_counter(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::PaymentCounter).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::PaymentCounter)
+            .unwrap_or(0)
     }
 
     pub fn get_max_batch_size(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::MaxBatchSize).unwrap_or(DEFAULT_MAX_BATCH_SIZE)
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxBatchSize)
+            .unwrap_or(DEFAULT_MAX_BATCH_SIZE)
     }
 
     pub fn is_disputed(env: Env, payment_id: u32) -> bool {
@@ -763,7 +903,350 @@ impl AhjoorPaymentsContract {
             .unwrap_or(DEFAULT_DISPUTE_TIMEOUT)
     }
 
+    // --- Payment Expiry (#54) ---
+
+    /// Admin sets the global payment timeout in seconds.
+    pub fn set_payment_timeout(env: Env, timeout_seconds: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        if timeout_seconds == 0 {
+            panic!("Timeout must be positive");
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentTimeout, &timeout_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_payment_timeout(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PaymentTimeout)
+            .unwrap_or(DEFAULT_PAYMENT_TIMEOUT)
+    }
+
+    /// Expire a pending payment after its deadline. Callable by anyone.
+    /// Returns funds to the customer and emits PaymentExpired event.
+    pub fn expire_payment(env: Env, payment_id: u32) {
+        let mut payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.status != PaymentStatus::Pending {
+            panic!("Only pending payments can expire");
+        }
+        if payment.expires_at == 0 {
+            panic!("Payment has no expiry set");
+        }
+        if env.ledger().timestamp() < payment.expires_at {
+            panic!("Payment has not expired yet");
+        }
+
+        let client = token::Client::new(&env, &payment.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &payment.customer,
+            &payment.amount,
+        );
+
+        let old_status = payment.status;
+        payment.status = PaymentStatus::Expired;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_payment_status_changed(&env, payment_id, old_status, PaymentStatus::Expired);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    // --- Partial Refund (#55) ---
+
+    /// Process a partial refund on a disputed payment. Admin only.
+    /// `refund_amount` must be <= (payment.amount - payment.refunded_amount).
+    pub fn partial_refund(env: Env, payment_id: u32, refund_amount: i128) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        if refund_amount <= 0 {
+            panic!("Refund amount must be positive");
+        }
+
+        let mut payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.status != PaymentStatus::Disputed && payment.status != PaymentStatus::Pending {
+            panic!("Payment must be pending or disputed for partial refund");
+        }
+
+        let remaining = payment.amount - payment.refunded_amount;
+        if refund_amount > remaining {
+            panic!("Refund amount exceeds remaining balance");
+        }
+
+        let client = token::Client::new(&env, &payment.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &payment.customer,
+            &refund_amount,
+        );
+
+        payment.refunded_amount += refund_amount;
+
+        // If fully refunded, mark as Refunded
+        if payment.refunded_amount >= payment.amount {
+            payment.status = PaymentStatus::Refunded;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    // --- Merchant Allowlist (#58) ---
+
+    /// Admin approves a merchant address.
+    pub fn approve_merchant(env: Env, merchant: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantApproved(merchant), &true);
+    }
+
+    /// Admin revokes a merchant address.
+    pub fn revoke_merchant(env: Env, merchant: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::MerchantApproved(merchant), &false);
+    }
+
+    /// Check if a merchant is approved.
+    pub fn is_merchant_approved(env: Env, merchant: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantApproved(merchant))
+            .unwrap_or(false)
+    }
+
+    /// Admin toggles open mode (bypasses merchant allowlist).
+    pub fn set_merchant_open_mode(env: Env, open: bool) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::MerchantOpenMode, &open);
+    }
+
+    pub fn is_merchant_open_mode(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::MerchantOpenMode)
+            .unwrap_or(true)
+    }
+
+    // --- Subscriptions (#60) ---
+
+    /// Subscriber creates a recurring payment. Signs once to authorize future charges.
+    pub fn create_subscription(
+        env: Env,
+        subscriber: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        interval_seconds: u64,
+        max_charges: u32,
+    ) -> u32 {
+        subscriber.require_auth();
+        if amount <= 0 {
+            panic!("Subscription amount must be positive");
+        }
+        if interval_seconds == 0 {
+            panic!("Interval must be positive");
+        }
+
+        Self::require_merchant_approved(&env, &merchant);
+
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SubscriptionCounter)
+            .unwrap_or(0);
+        let sub_id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::SubscriptionCounter, &counter);
+
+        let sub = Subscription {
+            id: sub_id,
+            subscriber,
+            merchant,
+            amount,
+            token,
+            interval_seconds,
+            last_charged_at: 0,
+            max_charges,
+            charges_count: 0,
+            active: true,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(sub_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(sub_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        sub_id
+    }
+
+    /// Charge a subscription. Callable by anyone when the interval has elapsed.
+    pub fn charge_subscription(env: Env, subscription_id: u32) {
+        let mut sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found");
+
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+        if sub.max_charges > 0 && sub.charges_count >= sub.max_charges {
+            panic!("Max charges reached");
+        }
+
+        let now = env.ledger().timestamp();
+        if sub.last_charged_at > 0 && now < sub.last_charged_at + sub.interval_seconds {
+            panic!("Interval has not elapsed");
+        }
+
+        let client = token::Client::new(&env, &sub.token);
+        client.transfer(
+            &sub.subscriber,
+            &env.current_contract_address(),
+            &sub.amount,
+        );
+        client.transfer(&env.current_contract_address(), &sub.merchant, &sub.amount);
+
+        sub.last_charged_at = now;
+        sub.charges_count += 1;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(subscription_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(subscription_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Cancel a subscription. Subscriber or merchant can cancel.
+    pub fn cancel_subscription(env: Env, caller: Address, subscription_id: u32) {
+        caller.require_auth();
+
+        let mut sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found");
+
+        if caller != sub.subscriber && caller != sub.merchant {
+            panic!("Only subscriber or merchant can cancel");
+        }
+
+        sub.active = false;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(subscription_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(subscription_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Read a subscription.
+    pub fn get_subscription(env: Env, subscription_id: u32) -> Subscription {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found")
+    }
+
     // --- Internal Helpers ---
+
+    /// Validates merchant is approved or open mode is enabled.
+    fn require_merchant_approved(env: &Env, merchant: &Address) {
+        let open_mode: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::MerchantOpenMode)
+            .unwrap_or(true); // Default: open mode (no allowlist enforcement)
+        if open_mode {
+            return;
+        }
+
+        let approved: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantApproved(merchant.clone()))
+            .unwrap_or(false);
+        if !approved {
+            panic!("Merchant not approved");
+        }
+    }
 
     fn next_payment_id(env: &Env) -> u32 {
         let mut counter: u32 = env
@@ -774,7 +1257,9 @@ impl AhjoorPaymentsContract {
         let id = counter;
         counter += 1;
         // Counter stays in instance storage — bounded, config-like
-        env.storage().instance().set(&DataKey::PaymentCounter, &counter);
+        env.storage()
+            .instance()
+            .set(&DataKey::PaymentCounter, &counter);
         id
     }
 

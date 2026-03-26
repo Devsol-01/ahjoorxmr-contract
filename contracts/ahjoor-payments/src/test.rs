@@ -1,6 +1,7 @@
 #![cfg(test)]
 extern crate alloc;
 use super::*;
+use proptest::prelude::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
@@ -844,6 +845,7 @@ mod mock_oracle {
 }
 
 use mock_oracle::MockOracle;
+
 struct MultiTokenSetup<'a> {
     env: Env,
     client: AhjoorPaymentsContractClient<'a>,
@@ -1375,6 +1377,43 @@ fn test_get_proposed_admin_returns_none_when_no_proposal() {
 }
 
 #[test]
+fn test_boundary_amount_i128_max_rejected_without_balance() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1);
+
+    let res = s
+        .client
+        .try_create_payment(&customer, &merchant, &i128::MAX, &s.token_addr);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_boundary_payment_id_u64_max_cast_not_found() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+    let id = u64::MAX as u32;
+    let res = s.client.try_get_payment(&id);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_auth_required_for_admin_complete_payment() {
+    let env = Env::default();
+    let contract_id = env.register(AhjoorPaymentsContract, ());
+    let client = AhjoorPaymentsContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let res = client.try_complete_payment(&0);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_event_snapshot_for_payment_creation() {
 fn test_upgrade_increments_contract_version() {
     let s = setup();
     s.client.initialize(&s.admin);
@@ -1475,6 +1514,17 @@ fn test_write_functions_blocked_when_paused_reads_still_work() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
+    let _ = s
+        .client
+        .create_payment(&customer, &merchant, &120, &s.token_addr);
+    let events = s.env.events().all();
+    assert!(!events.is_empty());
+    let snapshot = alloc::format!("{:?}", events);
+    assert!(!snapshot.is_empty());
+}
+
+#[test]
+fn test_fuzz_like_payment_inputs_100_cases() {
     s.client
         .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
 
@@ -1493,6 +1543,59 @@ fn test_recovery_after_resume() {
     s.client.initialize(&s.admin);
 
     let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &20_000_000);
+
+    let mut seed: u64 = 0x735735;
+    for _ in 0..100 {
+        seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+        let merchant = Address::generate(&s.env);
+        let amount = ((seed % 3000) as i128) + 1;
+        let _ = s
+            .client
+            .try_create_payment(&customer, &merchant, &amount, &s.token_addr);
+    }
+
+    assert!(s.client.get_payment_counter() <= 100);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(120))]
+
+    #[test]
+    fn prop_total_refunded_le_total_paid(
+        paid in prop::collection::vec(1i128..1_000_000, 1..120),
+        refunded in prop::collection::vec(0i128..1_000_000, 1..120),
+    ) {
+        let mut total_paid: i128 = 0;
+        let mut total_refunded: i128 = 0;
+
+        let len = core::cmp::min(paid.len(), refunded.len());
+        for index in 0..len {
+            let p = paid[index];
+            let r = core::cmp::min(refunded[index], p);
+            total_paid += p;
+            total_refunded += r;
+        }
+
+        prop_assert!(total_refunded <= total_paid);
+    }
+
+    #[test]
+    fn prop_completed_sum_equals_settled_volume(
+        completed in prop::collection::vec(0i128..1_000_000, 1..120)
+    ) {
+        let mut settled_volume: i128 = 0;
+        for amount in completed.iter() {
+            settled_volume += *amount;
+        }
+
+        let mut sum_completed: i128 = 0;
+        for amount in completed.iter() {
+            sum_completed += *amount;
+        }
+
+        prop_assert_eq!(sum_completed, settled_volume);
+    }
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 

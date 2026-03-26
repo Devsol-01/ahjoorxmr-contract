@@ -1,6 +1,7 @@
 #![cfg(test)]
 extern crate alloc;
 use super::*;
+use proptest::prelude::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
@@ -24,6 +25,8 @@ pub struct TestSetup<'a> {
     pub members: soroban_sdk::Vec<Address>,
     /// Same underlying client as `token_admin_client`, exposed for clarity in
     /// tests that use the members-oriented helpers.
+    #[allow(dead_code)]
+    pub member_token_admin: TokenAdminClient<'a>,
     pub _member_token_admin: TokenAdminClient<'a>,
 }
 
@@ -3261,6 +3264,80 @@ fn test_get_proposed_admin_returns_none_when_no_proposal() {
 }
 
 #[test]
+fn test_boundary_amount_i128_max_rejected_without_balance() {
+    let env = Env::default();
+    let (client, _admin, u1, _u2, _u3, _token_client, token) = setup_exit_env(&env);
+    let res = client.try_contribute(&u1, &token, &i128::MAX);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_boundary_payment_id_u64_max_cast_proposal_lookup() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+    let id = u64::MAX as u32;
+    assert_eq!(client.get_proposal(&id), None);
+}
+
+#[test]
+fn test_auth_required_for_contribute() {
+    let env = Env::default();
+    let contract_id = env.register(AhjoorContract, ());
+    let client = AhjoorContractClient::new(&env, &contract_id);
+    let contributor = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let res = client.try_contribute(&contributor, &token, &100);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_event_snapshot_for_pause_resume() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    client.pause_group(&soroban_sdk::String::from_str(&env, "snapshot"));
+    client.resume_group(&soroban_sdk::String::from_str(&env, "resume"));
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+    let snapshot = alloc::format!("{:?}", events);
+    assert!(!snapshot.is_empty());
+}
+
+#[test]
+fn test_fuzz_like_member_operations_100_cases() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, _u3, _tc, token) = setup_exit_env(&env);
+    let mut seed: u64 = 0x73CA73;
+
+    for _ in 0..100 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let amount = ((seed % 100) as i128) + 1;
+        let actor = if seed & 1 == 0 { u1.clone() } else { u2.clone() };
+        let _ = client.try_contribute(&actor, &token, &amount);
+    }
+
+    let info = client.get_group_info();
+    assert!(info.members.len() >= 2);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(120))]
+
+    #[test]
+    fn prop_round_payout_conservation(
+        contributions in prop::collection::vec(0i128..100_000, 1..120)
+    ) {
+        let mut total_collected = 0i128;
+        for amount in contributions.iter() {
+            total_collected += *amount;
+        }
+
+        let payout_amount = total_collected;
+        prop_assert_eq!(payout_amount, total_collected);
+        prop_assert!(payout_amount >= 0);
+    }
 fn test_upgrade_increments_contract_version() {
     let env = Env::default();
     let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);

@@ -638,6 +638,7 @@ impl AhjoorPaymentsContract {
 
         // --- Fallback: direct USDC payment, no oracle needed ---
         if payment_token == usdc_token {
+            customer.require_auth();
             Self::require_merchant_approved(&env, &merchant);
 
             let client = token::Client::new(&env, &payment_token);

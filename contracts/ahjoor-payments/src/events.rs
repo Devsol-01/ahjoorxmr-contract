@@ -102,6 +102,8 @@ pub struct ContractUpgraded {
     pub old_version: u32,
     pub new_version: u32,
     pub by_admin: Address,
+}
+
 /// Event: Contract paused
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -224,6 +226,10 @@ pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_ad
         old_version,
         new_version,
         by_admin,
+    }
+    .publish(e);
+}
+
 pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
     ContractPaused {
         admin,

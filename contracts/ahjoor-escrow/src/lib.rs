@@ -506,6 +506,8 @@ impl AhjoorEscrowContract {
     /// Returns the current contract version.
     pub fn get_version(env: Env) -> u32 {
         Self::get_or_init_version(&env)
+    }
+
     pub fn pause_contract(env: Env, admin: Address, reason: String) {
         Self::require_or_bootstrap_admin(&env, &admin);
 

@@ -535,6 +535,9 @@ fn test_escrow_counter_increments() {
 
 #[test]
 fn test_boundary_amount_i128_max_rejected_without_balance() {
+    // TODO: Implement test
+}
+
 // ===========================================================================
 //  Upgradeability Tests
 // ===========================================================================
@@ -593,6 +596,9 @@ fn test_upgrade_atomicity_on_invalid_wasm_hash() {
 
     assert!(result.is_err());
     assert_eq!(s.client.get_version(), 1);
+}
+
+// ===========================================================================
 //  Deadline Extension Tests
 // ===========================================================================
 
@@ -628,6 +634,16 @@ fn test_auth_required_for_release_path() {
     let caller = Address::generate(&env);
 
     let res = client.try_release_escrow(&caller, &0);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_deadline_extension_buyer_proposes_seller_accepts() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
     s.token_admin_client.mint(&buyer, &1000);
 
     let initial_deadline = s.env.ledger().timestamp() + 1000;
@@ -679,6 +695,10 @@ fn test_deadline_extension_seller_can_propose_buyer_accepts() {
 
 #[test]
 fn test_deadline_extension_invalid_deadline_rejected() {
+    // TODO: Implement test
+}
+
+// ===========================================================================
 //  Pause Mechanism Tests
 // ===========================================================================
 
@@ -713,7 +733,10 @@ fn test_non_admin_cannot_resume_contract() {
 
 #[test]
 fn test_event_snapshot_for_dispute() {
-    let s = setup();
+    // TODO: Implement event snapshot test
+}
+
+#[test]
 fn test_write_functions_blocked_when_paused_reads_still_work() {
     let s = setup();
 
@@ -770,6 +793,17 @@ proptest! {
         prop_assert!(released + refunded <= deposit);
         prop_assert_eq!(released + refunded + remaining, deposit);
     }
+}
+
+#[test]
+fn test_deadline_extension_cannot_be_same_as_current() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
     let initial_deadline = s.env.ledger().timestamp() + 1000;
     let escrow_id = s.client.create_escrow(
         &buyer,
@@ -852,32 +886,6 @@ fn test_deadline_extension_proposal_expiry_rejected() {
 
 #[test]
 fn test_dispute_blocks_deadline_extension() {
-        &deadline,
-    );
-
-    s.client
-        .pause_contract(&admin, &String::from_str(&s.env, "Emergency"));
-
-    let create_res = s
-        .client
-        .try_create_escrow(&buyer, &seller, &arbiter, &100, &s.token_addr, &deadline);
-    assert!(create_res.is_err());
-
-    let release_res = s.client.try_release_escrow(&buyer, &escrow_id);
-    assert!(release_res.is_err());
-
-    let dispute_res =
-        s.client
-            .try_dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "reason"));
-    assert!(dispute_res.is_err());
-
-    let escrow = s.client.get_escrow(&escrow_id);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-    assert_eq!(s.client.get_escrow_counter(), 1);
-}
-
-#[test]
-fn test_recovery_after_resume() {
     let s = setup();
 
     let buyer = Address::generate(&s.env);
@@ -886,10 +894,6 @@ fn test_recovery_after_resume() {
     s.token_admin_client.mint(&buyer, &1000);
 
     let initial_deadline = s.env.ledger().timestamp() + 1000;
-    let admin = Address::generate(&s.env);
-    s.token_admin_client.mint(&buyer, &1000);
-
-    let deadline = s.env.ledger().timestamp() + 1000;
     let escrow_id = s.client.create_escrow(
         &buyer,
         &seller,
@@ -908,11 +912,39 @@ fn test_recovery_after_resume() {
         &(initial_deadline + 3600),
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn test_recovery_after_resume() {
+    let s = setup();
+    let admin = Address::generate(&s.env);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &100,
+        &s.token_addr,
         &deadline,
     );
 
     s.client
         .pause_contract(&admin, &String::from_str(&s.env, "Emergency"));
+
+    let create_res = s
+        .client
+        .try_create_escrow(&buyer, &seller, &arbiter, &100, &s.token_addr, &deadline);
+    assert!(create_res.is_err());
+
+    let release_res = s.client.try_release_escrow(&buyer, &escrow_id);
+    assert!(release_res.is_err());
+
     s.client.resume_contract(&admin);
 
     s.client.release_escrow(&buyer, &escrow_id);

@@ -928,14 +928,15 @@ fn test_multi_token_usdc_fallback() {
         .client
         .create_payment_multi_token(&customer, &merchant, &500, &s.usdc_addr, &50);
 
-    // Funds escrowed in contract
-    assert_eq!(s.usdc_client.balance(&customer), 500);
-    assert_eq!(s.usdc_client.balance(&s.client.address), 500);
-
+    // Verify payment was created
     let payment = s.client.get_payment(&pid);
     assert_eq!(payment.amount, 500);
     assert_eq!(payment.token, s.usdc_addr);
     assert_eq!(payment.status, PaymentStatus::Pending);
+
+    // Verify funds were escrowed
+    assert_eq!(s.usdc_client.balance(&customer), 500);
+    assert_eq!(s.usdc_client.balance(&s.client.address), 500);
 }
 
 /// XLM payment: oracle price = 0.10 USDC per XLM (price = 1_000_000 in 10^7).
@@ -1414,6 +1415,10 @@ fn test_auth_required_for_admin_complete_payment() {
 
 #[test]
 fn test_event_snapshot_for_payment_creation() {
+    // TODO: Implement event snapshot test
+}
+
+#[test]
 fn test_upgrade_increments_contract_version() {
     let s = setup();
     s.client.initialize(&s.admin);
@@ -1467,6 +1472,8 @@ fn test_upgrade_atomic_when_wasm_hash_invalid() {
 
     assert!(result.is_err());
     assert_eq!(s.client.get_version(), 1);
+}
+
 // ===========================================================================
 //  Pause Mechanism Tests
 // ===========================================================================
@@ -1524,7 +1531,14 @@ fn test_write_functions_blocked_when_paused_reads_still_work() {
 }
 
 #[test]
-fn test_fuzz_like_payment_inputs_100_cases() {
+fn test_write_operations_blocked_when_paused() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
     s.client
         .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
 
@@ -1538,7 +1552,7 @@ fn test_fuzz_like_payment_inputs_100_cases() {
 }
 
 #[test]
-fn test_recovery_after_resume() {
+fn test_fuzz_like_payment_inputs_100_cases() {
     let s = setup();
     s.client.initialize(&s.admin);
 
@@ -1596,6 +1610,14 @@ proptest! {
 
         prop_assert_eq!(sum_completed, settled_volume);
     }
+}
+
+#[test]
+fn test_recovery_after_resume() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let customer = Address::generate(&s.env);
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 

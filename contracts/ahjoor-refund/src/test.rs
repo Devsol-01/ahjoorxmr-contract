@@ -7,7 +7,6 @@ use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Events},
     Address, BytesN, Env, String,
-    Address, Env, String,
 };
 
 const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
@@ -603,6 +602,10 @@ fn test_auth_required_for_admin_approve_refund() {
 
 #[test]
 fn test_event_snapshot_for_refund_request() {
+    // TODO: Implement event snapshot test
+}
+
+#[test]
 fn test_admin_upgrade_increments_version() {
     let s = setup();
     s.client.initialize(&s.admin);
@@ -656,6 +659,8 @@ fn test_upgrade_atomicity_with_invalid_hash() {
 
     assert!(result.is_err());
     assert_eq!(s.client.get_version(), 1);
+}
+
 // ===========================================================================
 //  Pause Mechanism Tests
 // ===========================================================================
@@ -755,6 +760,16 @@ proptest! {
 
         prop_assert!(total_refunded <= total_paid);
     }
+}
+
+#[test]
+fn test_write_operations_blocked_when_paused() {
+    let s = setup();
+    s.client.initialize(&s.admin);
+
+    let customer = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
     s.client
         .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
 

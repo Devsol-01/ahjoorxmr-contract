@@ -56,6 +56,8 @@ pub struct ContractUpgraded {
     pub old_version: u32,
     pub new_version: u32,
     pub by_admin: Address,
+}
+
 /// Event: Deadline extension proposed by a participant
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -73,6 +75,8 @@ pub struct DeadlineExtended {
     pub escrow_id: u32,
     pub old_deadline: u64,
     pub new_deadline: u64,
+}
+
 /// Event: Contract paused
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -170,6 +174,10 @@ pub fn emit_deadline_extension_proposed(
         proposer,
         new_deadline,
         proposed_at,
+    }
+    .publish(e);
+}
+
 pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
     ContractPaused {
         admin,
@@ -186,6 +194,8 @@ pub fn emit_deadline_extended(e: &Env, escrow_id: u32, old_deadline: u64, new_de
         new_deadline,
     }
     .publish(e);
+}
+
 pub fn emit_contract_resumed(e: &Env, admin: Address, timestamp: u64) {
     ContractResumed { admin, timestamp }.publish(e);
 }

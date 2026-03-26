@@ -6,8 +6,10 @@ use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, IntoVal, Symbol,
+    vec, Address, BytesN, Env, IntoVal, Symbol,
 };
+
+const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
 
 /// Shared test context for ROSCA contract tests.
 pub struct TestSetup<'a> {
@@ -3256,4 +3258,59 @@ fn test_get_proposed_admin_returns_none_when_no_proposal() {
     let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
 
     assert_eq!(client.get_proposed_admin(), None);
+}
+
+#[test]
+fn test_upgrade_increments_contract_version() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    assert_eq!(client.get_version(), 1);
+
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    client.upgrade(&admin, &wasm_hash);
+
+    let version: u32 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::ContractVersion)
+            .unwrap()
+    });
+    assert_eq!(version, 2);
+}
+
+#[test]
+fn test_upgrade_by_non_admin_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    let intruder = Address::generate(&env);
+    let wasm_hash = env.deployer().upload_contract_wasm(UPGRADE_WASM);
+    let result = client.try_upgrade(&intruder, &wasm_hash);
+
+    assert!(result.is_err());
+    assert_eq!(client.get_version(), 1);
+}
+
+#[test]
+fn test_migration_is_once_per_version() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    client.migrate(&admin);
+    let second = client.try_migrate(&admin);
+
+    assert!(second.is_err());
+}
+
+#[test]
+fn test_upgrade_atomicity_invalid_hash() {
+    let env = Env::default();
+    let (client, admin, _u1, _u2, _u3, _tc, _ta) = setup_exit_env(&env);
+
+    let invalid_hash = BytesN::from_array(&env, &[3u8; 32]);
+    let result = client.try_upgrade(&admin, &invalid_hash);
+
+    assert!(result.is_err());
+    assert_eq!(client.get_version(), 1);
 }

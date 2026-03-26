@@ -49,6 +49,13 @@ pub struct EscrowRefunded {
     pub amount: i128,
 }
 
+/// Event: Contract WASM upgraded
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub old_version: u32,
+    pub new_version: u32,
+    pub by_admin: Address,
 /// Event: Deadline extension proposed by a participant
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -143,6 +150,14 @@ pub fn emit_escrow_refunded(e: &Env, escrow_id: u32, buyer: Address, amount: i12
     .publish(e);
 }
 
+pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_admin: Address) {
+    ContractUpgraded {
+        old_version,
+        new_version,
+        by_admin,
+    }
+    .publish(e);
+}
 pub fn emit_deadline_extension_proposed(
     e: &Env,
     escrow_id: u32,

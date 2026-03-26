@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, String,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, String,
 };
 
 // --- Storage TTL Constants ---
@@ -40,6 +40,8 @@ pub enum DataKey {
     Paused,
     PauseReason,
     RefundCounter,
+    ContractVersion,
+    MigrationCompleted(u32),
     Refund(u32),
 }
 
@@ -58,6 +60,7 @@ impl AhjoorRefundContract {
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::RefundCounter, &0u32);
+        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
 
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
@@ -266,6 +269,65 @@ impl AhjoorRefundContract {
             .expect("Not initialized")
     }
 
+    /// Upgrade this contract's WASM code. Admin only.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can upgrade contract");
+        }
+
+        let old_version = Self::get_or_init_version(&env);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+
+        let new_version = old_version.checked_add(1).expect("Version overflow");
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &new_version);
+
+        events::emit_contract_upgraded(&env, old_version, new_version, admin);
+
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Run one-time migration logic for the current version. Admin only.
+    pub fn migrate(env: Env, admin: Address) {
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can migrate contract");
+        }
+
+        let version = Self::get_or_init_version(&env);
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationCompleted(version))
+            .unwrap_or(false)
+        {
+            panic!("Migration already completed for this version");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationCompleted(version), &true);
+
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the current contract version.
+    pub fn get_version(env: Env) -> u32 {
+        Self::get_or_init_version(&env)
     pub fn pause_contract(env: Env, admin: Address, reason: String) {
         Self::require_admin(&env, &admin);
 
@@ -333,6 +395,22 @@ impl AhjoorRefundContract {
         counter += 1;
         env.storage().instance().set(&DataKey::RefundCounter, &counter);
         id
+    }
+
+    fn get_or_init_version(env: &Env) -> u32 {
+        if let Some(version) = env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::ContractVersion)
+        {
+            version
+        } else {
+            let initial_version = 1u32;
+            env.storage()
+                .instance()
+                .set(&DataKey::ContractVersion, &initial_version);
+            initial_version
+        }
     }
 }
 

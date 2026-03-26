@@ -95,6 +95,13 @@ pub struct AdminTransferred {
     pub new_admin: Address,
 }
 
+/// Event: Contract WASM upgraded
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContractUpgraded {
+    pub old_version: u32,
+    pub new_version: u32,
+    pub by_admin: Address,
 /// Event: Contract paused
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -212,6 +219,11 @@ pub fn emit_admin_transferred(e: &Env, old_admin: Address, new_admin: Address) {
     AdminTransferred { old_admin, new_admin }.publish(e);
 }
 
+pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_admin: Address) {
+    ContractUpgraded {
+        old_version,
+        new_version,
+        by_admin,
 pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
     ContractPaused {
         admin,

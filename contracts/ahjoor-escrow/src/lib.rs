@@ -55,6 +55,9 @@ pub struct DeadlineProposal {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
+    Admin,
+    Paused,
+    PauseReason,
     EscrowCounter,
     Escrow(u32),
     Dispute(u32),
@@ -79,6 +82,7 @@ impl AhjoorEscrowContract {
         token: Address,
         deadline: u64,
     ) -> u32 {
+        Self::require_not_paused(&env);
         buyer.require_auth();
 
         if amount <= 0 {
@@ -131,6 +135,7 @@ impl AhjoorEscrowContract {
 
     /// Release escrowed funds to seller. Can be called by buyer or arbiter.
     pub fn release_escrow(env: Env, caller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
         caller.require_auth();
 
         let mut escrow: Escrow = env
@@ -166,6 +171,7 @@ impl AhjoorEscrowContract {
 
     /// Dispute an escrow. Can be called by buyer or seller.
     pub fn dispute_escrow(env: Env, caller: Address, escrow_id: u32, reason: String) {
+        Self::require_not_paused(&env);
         caller.require_auth();
 
         let mut escrow: Escrow = env
@@ -211,6 +217,7 @@ impl AhjoorEscrowContract {
 
     /// Resolve a dispute. Only arbiter can call this.
     pub fn resolve_dispute(env: Env, arbiter: Address, escrow_id: u32, release_to_seller: bool) {
+        Self::require_not_paused(&env);
         arbiter.require_auth();
 
         let mut escrow: Escrow = env
@@ -261,6 +268,7 @@ impl AhjoorEscrowContract {
 
     /// Auto-release expired escrow (past deadline, undisputed). Can be called by buyer.
     pub fn auto_release_expired(env: Env, escrow_id: u32) {
+        Self::require_not_paused(&env);
         let mut escrow: Escrow = env
             .storage()
             .persistent()
@@ -425,7 +433,73 @@ impl AhjoorEscrowContract {
         env.storage().instance().get(&DataKey::EscrowCounter).unwrap_or(0)
     }
 
+    pub fn pause_contract(env: Env, admin: Address, reason: String) {
+        Self::require_or_bootstrap_admin(&env, &admin);
+
+        if Self::is_paused(env.clone()) {
+            panic!("Contract already paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::PauseReason, &reason);
+
+        events::emit_contract_paused(&env, admin, reason, env.ledger().timestamp());
+    }
+
+    pub fn resume_contract(env: Env, admin: Address) {
+        Self::require_admin(&env, &admin);
+
+        if !Self::is_paused(env.clone()) {
+            panic!("Contract is not paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PauseReason);
+
+        events::emit_contract_resumed(&env, admin, env.ledger().timestamp());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    pub fn get_pause_reason(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::PauseReason)
+            .unwrap_or(String::from_str(&env, ""))
+    }
+
     // --- Internal Helpers ---
+
+    fn require_not_paused(env: &Env) {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            panic!("Contract is paused");
+        }
+    }
+
+    fn require_or_bootstrap_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        if let Some(stored_admin) = env.storage().instance().get::<DataKey, Address>(&DataKey::Admin) {
+            if stored_admin != *admin {
+                panic!("Only admin can pause contract");
+            }
+        } else {
+            env.storage().instance().set(&DataKey::Admin, admin);
+        }
+    }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if stored_admin != *admin {
+            panic!("Only admin can resume contract");
+        }
+    }
 
     fn next_escrow_id(env: &Env) -> u32 {
         let mut counter: u32 = env

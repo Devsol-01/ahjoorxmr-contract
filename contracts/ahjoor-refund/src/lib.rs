@@ -37,6 +37,8 @@ pub struct Refund {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    Paused,
+    PauseReason,
     RefundCounter,
     Refund(u32),
 }
@@ -69,6 +71,7 @@ impl AhjoorRefundContract {
         token: Address,
         reason: String,
     ) -> u32 {
+        Self::require_not_paused(&env);
         customer.require_auth();
 
         if amount <= 0 {
@@ -115,6 +118,7 @@ impl AhjoorRefundContract {
 
     /// Approve a refund request. Only admin can call this.
     pub fn approve_refund(env: Env, admin: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -154,6 +158,7 @@ impl AhjoorRefundContract {
 
     /// Reject a refund request. Only admin can call this.
     pub fn reject_refund(env: Env, admin: Address, refund_id: u32, rejection_reason: String) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -192,6 +197,7 @@ impl AhjoorRefundContract {
 
     /// Process an approved refund. Transfers tokens to customer. Only admin can call this.
     pub fn process_refund(env: Env, admin: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
         admin.require_auth();
 
         let stored_admin: Address = env
@@ -260,7 +266,62 @@ impl AhjoorRefundContract {
             .expect("Not initialized")
     }
 
+    pub fn pause_contract(env: Env, admin: Address, reason: String) {
+        Self::require_admin(&env, &admin);
+
+        if Self::is_paused(env.clone()) {
+            panic!("Contract already paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().set(&DataKey::PauseReason, &reason);
+
+        events::emit_contract_paused(&env, admin, reason, env.ledger().timestamp());
+    }
+
+    pub fn resume_contract(env: Env, admin: Address) {
+        Self::require_admin(&env, &admin);
+
+        if !Self::is_paused(env.clone()) {
+            panic!("Contract is not paused");
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().remove(&DataKey::PauseReason);
+
+        events::emit_contract_resumed(&env, admin, env.ledger().timestamp());
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+    }
+
+    pub fn get_pause_reason(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::PauseReason)
+            .unwrap_or(String::from_str(&env, ""))
+    }
+
     // --- Internal Helpers ---
+
+    fn require_not_paused(env: &Env) {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            panic!("Contract is paused");
+        }
+    }
+
+    fn require_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if stored_admin != *admin {
+            panic!("Only admin can manage pause state");
+        }
+    }
 
     fn next_refund_id(env: &Env) -> u32 {
         let mut counter: u32 = env

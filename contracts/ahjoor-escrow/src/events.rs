@@ -49,6 +49,25 @@ pub struct EscrowRefunded {
     pub amount: i128,
 }
 
+/// Event: Deadline extension proposed by a participant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DeadlineExtensionProposed {
+    pub escrow_id: u32,
+    pub proposer: Address,
+    pub new_deadline: u64,
+    pub proposed_at: u64,
+}
+
+/// Event: Deadline updated after counterparty acceptance
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DeadlineExtended {
+    pub escrow_id: u32,
+    pub old_deadline: u64,
+    pub new_deadline: u64,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_escrow_created(
@@ -105,6 +124,31 @@ pub fn emit_escrow_refunded(e: &Env, escrow_id: u32, buyer: Address, amount: i12
         escrow_id,
         buyer,
         amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_deadline_extension_proposed(
+    e: &Env,
+    escrow_id: u32,
+    proposer: Address,
+    new_deadline: u64,
+    proposed_at: u64,
+) {
+    DeadlineExtensionProposed {
+        escrow_id,
+        proposer,
+        new_deadline,
+        proposed_at,
+    }
+    .publish(e);
+}
+
+pub fn emit_deadline_extended(e: &Env, escrow_id: u32, old_deadline: u64, new_deadline: u64) {
+    DeadlineExtended {
+        escrow_id,
+        old_deadline,
+        new_deadline,
     }
     .publish(e);
 }

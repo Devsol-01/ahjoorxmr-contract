@@ -102,7 +102,7 @@ fn test_create_escrow_past_deadline_panics() {
     let arbiter = Address::generate(&s.env);
     s.token_admin_client.mint(&buyer, &1000);
 
-    let deadline = s.env.ledger().timestamp() - 1000;
+    let deadline = s.env.ledger().timestamp();
     s.client.create_escrow(&buyer, &seller, &arbiter, &250, &s.token_addr, &deadline);
 }
 
@@ -526,4 +526,178 @@ fn test_escrow_counter_increments() {
     s.client.create_escrow(&buyer, &seller, &arbiter, &200, &s.token_addr, &deadline);
 
     assert_eq!(s.client.get_escrow_counter(), 2);
+}
+
+// ===========================================================================
+//  Deadline Extension Tests
+// ===========================================================================
+
+#[test]
+fn test_deadline_extension_two_party_flow() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    let extended_deadline = initial_deadline + 3600;
+    s.client
+        .propose_deadline_extension(&buyer, &escrow_id, &extended_deadline);
+    s.client.accept_deadline_extension(&seller, &escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.deadline, extended_deadline);
+}
+
+#[test]
+fn test_deadline_extension_seller_can_propose_buyer_accepts() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    let extended_deadline = initial_deadline + 7200;
+    s.client
+        .propose_deadline_extension(&seller, &escrow_id, &extended_deadline);
+    s.client.accept_deadline_extension(&buyer, &escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.deadline, extended_deadline);
+}
+
+#[test]
+fn test_deadline_extension_invalid_deadline_rejected() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    let result = s
+        .client
+        .try_propose_deadline_extension(&buyer, &escrow_id, &initial_deadline);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deadline_extension_same_party_accept_rejected() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    let extended_deadline = initial_deadline + 1800;
+    s.client
+        .propose_deadline_extension(&buyer, &escrow_id, &extended_deadline);
+
+    let result = s.client.try_accept_deadline_extension(&buyer, &escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deadline_extension_proposal_expiry_rejected() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    let extended_deadline = initial_deadline + 1800;
+    s.client
+        .propose_deadline_extension(&buyer, &escrow_id, &extended_deadline);
+
+    s.env.ledger().set_timestamp(s.env.ledger().timestamp() + 24 * 60 * 60 + 1);
+
+    let result = s.client.try_accept_deadline_extension(&seller, &escrow_id);
+    assert!(result.is_err());
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.deadline, initial_deadline);
+}
+
+#[test]
+fn test_dispute_blocks_deadline_extension() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let initial_deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &initial_deadline,
+    );
+
+    s.client
+        .dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "Need review"));
+
+    let result = s.client.try_propose_deadline_extension(
+        &buyer,
+        &escrow_id,
+        &(initial_deadline + 3600),
+    );
+    assert!(result.is_err());
 }

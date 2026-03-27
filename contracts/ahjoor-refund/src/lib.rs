@@ -290,7 +290,13 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        events::emit_refund_rejected(&env, refund_id, admin, rejection_reason);
+        events::emit_refund_rejected(
+            &env,
+            refund_id,
+            admin,
+            rejection_reason,
+            env.ledger().timestamp(),
+        );
 
         env.storage()
             .instance()

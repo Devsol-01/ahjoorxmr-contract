@@ -499,7 +499,13 @@ impl AhjoorPaymentsContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        events::emit_payment_completed(&env, payment_id, payment.merchant.clone(), payment.amount);
+        events::emit_payment_completed(
+            &env,
+            payment_id,
+            payment.merchant.clone(),
+            payment.amount,
+            completed_at,
+        );
         events::emit_payment_status_changed(&env, payment_id, old_status, PaymentStatus::Completed);
         events::emit_payment_receipt_issued(&env, payment_id, receipt_hash);
 
@@ -1294,6 +1300,13 @@ impl AhjoorPaymentsContract {
         // Update stats (#70)
         Self::inc_global_expired(&env);
 
+        events::emit_payment_expired(
+            &env,
+            payment_id,
+            payment.customer.clone(),
+            payment.amount,
+            env.ledger().timestamp(),
+        );
         events::emit_payment_status_changed(&env, payment_id, old_status, PaymentStatus::Expired);
         env.storage()
             .instance()
@@ -1349,6 +1362,15 @@ impl AhjoorPaymentsContract {
         // Update stats (#70) — count each partial refund call
         Self::inc_global_refunded(&env, &payment.token, refund_amount);
         Self::inc_merchant_refunded(&env, &payment.merchant, &payment.token, refund_amount);
+
+        let remaining = payment.amount - payment.refunded_amount;
+        events::emit_payment_partial_refund(
+            &env,
+            payment_id,
+            payment.customer.clone(),
+            refund_amount,
+            remaining,
+        );
 
         env.storage()
             .persistent()
@@ -1523,6 +1545,16 @@ impl AhjoorPaymentsContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        events::emit_subscription_charged(
+            &env,
+            subscription_id,
+            sub.subscriber,
+            sub.merchant,
+            sub.amount,
+            now,
+        );
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -1552,6 +1584,8 @@ impl AhjoorPaymentsContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+
+        events::emit_subscription_cancelled(&env, subscription_id, caller);
     }
 
     /// Read a subscription.

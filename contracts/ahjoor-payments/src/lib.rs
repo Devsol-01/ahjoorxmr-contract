@@ -1,6 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, BytesN, Env, Map, String, Vec,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    Env, Map, String, Vec,
 };
 
 /// Maximum length (bytes) for the optional payment reference string.
@@ -53,8 +54,17 @@ const TEMP_BUMP_AMOUNT: u32 = 15_000;
 
 const DEFAULT_MAX_BATCH_SIZE: u32 = 20;
 const DEFAULT_DISPUTE_TIMEOUT: u64 = 7 * 24 * 60 * 60; // 7 days in seconds
+/// Default rate limit: effectively disabled until admin configures stricter values.
+const DEFAULT_RATE_LIMIT_MAX_PAYMENTS: u32 = u32::MAX;
+const DEFAULT_RATE_LIMIT_WINDOW_SIZE_LEDGERS: u32 = 1;
 /// Reflector oracle price precision: prices are scaled by 10^7
 const ORACLE_PRICE_PRECISION: i128 = 10_000_000;
+
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    RateLimitExceeded = 1,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -123,6 +133,20 @@ pub struct Subscription {
     pub active: bool,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitConfig {
+    pub max_payments: u32,
+    pub window_size_ledgers: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustomerRateLimit {
+    pub count: u32,
+    pub window_start_ledger: u32,
+}
+
 /// Storage key classification:
 /// - Instance:    Admin, PaymentCounter, MaxBatchSize, DisputeTimeout,
 ///                OracleAddress, UsdcToken
@@ -157,6 +181,8 @@ pub enum DataKey {
     MerchantOpenMode,
     /// Subscription counter
     SubscriptionCounter,
+    /// Global per-customer payment creation rate limit config
+    RateLimitConfig,
     /// Current contract schema/runtime version
     ContractVersion,
     /// Migration completion flag for a specific version
@@ -164,6 +190,8 @@ pub enum DataKey {
     // --- Persistent ---
     Payment(u32),
     CustomerPayments(Address),
+    /// Per-customer rate limit usage state
+    CustomerRateLimit(Address),
     /// Merchant approval status (true = approved)
     MerchantApproved(Address),
     /// Subscription record
@@ -199,7 +227,16 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeTimeout, &DEFAULT_DISPUTE_TIMEOUT);
-        env.storage().instance().set(&DataKey::ContractVersion, &1u32);
+        env.storage().instance().set(
+            &DataKey::RateLimitConfig,
+            &RateLimitConfig {
+                max_payments: DEFAULT_RATE_LIMIT_MAX_PAYMENTS,
+                window_size_ledgers: DEFAULT_RATE_LIMIT_WINDOW_SIZE_LEDGERS,
+            },
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::ContractVersion, &1u32);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         env.storage()
@@ -224,6 +261,7 @@ impl AhjoorPaymentsContract {
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
+        Self::enforce_rate_limit(&env, &customer, 1);
 
         if amount <= 0 {
             panic!("Payment amount must be positive");
@@ -301,6 +339,7 @@ impl AhjoorPaymentsContract {
         if batch_len == 0 {
             panic!("Batch cannot be empty");
         }
+        Self::enforce_rate_limit(&env, &customer, batch_len);
 
         let max_batch_size: u32 = env
             .storage()
@@ -677,6 +716,7 @@ impl AhjoorPaymentsContract {
         // --- Fallback: direct USDC payment, no oracle needed ---
         if payment_token == usdc_token {
             customer.require_auth();
+            Self::enforce_rate_limit(&env, &customer, 1);
             Self::require_merchant_approved(&env, &merchant);
 
             let client = token::Client::new(&env, &payment_token);
@@ -730,6 +770,7 @@ impl AhjoorPaymentsContract {
         }
 
         customer.require_auth();
+        Self::enforce_rate_limit(&env, &customer, 1);
 
         let oracle_addr: Address = env
             .storage()
@@ -900,6 +941,42 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .set(&DataKey::DisputeTimeout, &timeout);
+    }
+
+    /// Admin updates global per-customer payment rate limit settings.
+    pub fn update_rate_limit_config(
+        env: Env,
+        admin: Address,
+        max_payments: u32,
+        window_size_ledgers: u32,
+    ) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can update rate limit config");
+        }
+        if max_payments == 0 {
+            panic!("max_payments must be positive");
+        }
+        if window_size_ledgers == 0 {
+            panic!("window_size_ledgers must be positive");
+        }
+
+        env.storage().instance().set(
+            &DataKey::RateLimitConfig,
+            &RateLimitConfig {
+                max_payments,
+                window_size_ledgers,
+            },
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     /// Propose a new admin address. Only the current admin can propose.
@@ -1089,6 +1166,10 @@ impl AhjoorPaymentsContract {
             .instance()
             .get(&DataKey::DisputeTimeout)
             .unwrap_or(DEFAULT_DISPUTE_TIMEOUT)
+    }
+
+    pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
+        Self::get_rate_limit_config_internal(&env)
     }
 
     // --- Payment Expiry (#54) ---
@@ -1449,7 +1530,10 @@ impl AhjoorPaymentsContract {
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn get_pause_reason(env: Env) -> String {
@@ -1462,7 +1546,12 @@ impl AhjoorPaymentsContract {
     // --- Internal Helpers ---
 
     fn require_not_paused(env: &Env) {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             panic!("Contract is paused");
         }
     }
@@ -1477,6 +1566,43 @@ impl AhjoorPaymentsContract {
         if stored_admin != *admin {
             panic!("Only admin can manage pause state");
         }
+    }
+
+    fn enforce_rate_limit(env: &Env, customer: &Address, requested_payments: u32) {
+        if requested_payments == 0 {
+            return;
+        }
+
+        let cfg = Self::get_rate_limit_config_internal(env);
+        let current_ledger = env.ledger().sequence();
+        let key = DataKey::CustomerRateLimit(customer.clone());
+
+        let mut state: CustomerRateLimit =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(CustomerRateLimit {
+                    count: 0,
+                    window_start_ledger: current_ledger,
+                });
+
+        if current_ledger.saturating_sub(state.window_start_ledger) >= cfg.window_size_ledgers {
+            state.count = 0;
+            state.window_start_ledger = current_ledger;
+        }
+
+        let new_count = state.count.saturating_add(requested_payments);
+        if new_count > cfg.max_payments {
+            panic_with_error!(env, Error::RateLimitExceeded);
+        }
+
+        state.count = new_count;
+        env.storage().persistent().set(&key, &state);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
     }
 
     /// Validates merchant is approved or open mode is enabled.
@@ -1539,7 +1665,12 @@ impl AhjoorPaymentsContract {
     }
 
     /// Append payment_id to the merchant+reference index (#67).
-    fn index_payment_by_reference(env: &Env, merchant: &Address, reference: &String, payment_id: u32) {
+    fn index_payment_by_reference(
+        env: &Env,
+        merchant: &Address,
+        reference: &String,
+        payment_id: u32,
+    ) {
         let hash = Self::reference_hash(env, reference);
         let key = DataKey::MerchantReference(merchant.clone(), hash);
         let mut ids: Vec<u32> = env
@@ -1602,6 +1733,16 @@ impl AhjoorPaymentsContract {
                 .set(&DataKey::ContractVersion, &initial_version);
             initial_version
         }
+    }
+
+    fn get_rate_limit_config_internal(env: &Env) -> RateLimitConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::RateLimitConfig)
+            .unwrap_or(RateLimitConfig {
+                max_payments: DEFAULT_RATE_LIMIT_MAX_PAYMENTS,
+                window_size_ledgers: DEFAULT_RATE_LIMIT_WINDOW_SIZE_LEDGERS,
+            })
     }
 }
 

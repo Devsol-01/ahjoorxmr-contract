@@ -34,6 +34,7 @@ dependencies = [
 name = "ahjoor-refund"
 version = "0.1.0"
 dependencies = [
+ "ahjoor-payments",
  "proptest",
  "soroban-sdk",
 ]

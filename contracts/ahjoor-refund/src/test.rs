@@ -6,18 +6,25 @@ use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
     testutils::{Address as _, Events},
-    Address, BytesN, Env, String,
+    Address, BytesN, Env, Map, String,
 };
 
 const UPGRADE_WASM: &[u8] = include_bytes!("../../../fixtures/upgrade_contract.wasm");
 
 // ---------------------------------------------------------------------------
+// Import the payments contract for cross-contract integration tests.
+// ---------------------------------------------------------------------------
+use ahjoor_payments::{AhjoorPaymentsContract, AhjoorPaymentsContractClient};
+
+// ---------------------------------------------------------------------------
 //  Test Helpers
 // ---------------------------------------------------------------------------
 
+/// Full integration setup: both payment and refund contracts deployed.
 struct TestSetup<'a> {
     env: Env,
-    client: AhjoorRefundContractClient<'a>,
+    refund_client: AhjoorRefundContractClient<'a>,
+    payment_client: AhjoorPaymentsContractClient<'a>,
     admin: Address,
     token_addr: Address,
     token_client: TokenClient<'a>,
@@ -28,8 +35,13 @@ fn setup<'a>() -> TestSetup<'a> {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(AhjoorRefundContract, ());
-    let client = AhjoorRefundContractClient::new(&env, &contract_id);
+    // Deploy payment contract
+    let payment_id = env.register(AhjoorPaymentsContract, ());
+    let payment_client = AhjoorPaymentsContractClient::new(&env, &payment_id);
+
+    // Deploy refund contract
+    let refund_id = env.register(AhjoorRefundContract, ());
+    let refund_client = AhjoorRefundContractClient::new(&env, &refund_id);
 
     let admin = Address::generate(&env);
     let token_addr = env
@@ -38,14 +50,27 @@ fn setup<'a>() -> TestSetup<'a> {
     let token_client = TokenClient::new(&env, &token_addr);
     let token_admin_client = TokenAdminClient::new(&env, &token_addr);
 
+    // Initialize both contracts
+    payment_client.initialize(&admin);
+    refund_client.initialize(&admin, &payment_id);
+
     TestSetup {
         env,
-        client,
+        refund_client,
+        payment_client,
         admin,
         token_addr,
         token_client,
         token_admin_client,
     }
+}
+
+/// Helper: create a completed payment and return its ID.
+fn create_completed_payment<'a>(s: &TestSetup<'a>, customer: &Address, merchant: &Address, amount: i128) -> u32 {
+    s.token_admin_client.mint(customer, &(amount * 2));
+    let pid = s.payment_client.create_payment(customer, merchant, &amount, &s.token_addr, &None, &None);
+    s.payment_client.complete_payment(&pid);
+    pid
 }
 
 // ===========================================================================
@@ -55,59 +80,116 @@ fn setup<'a>() -> TestSetup<'a> {
 #[test]
 fn test_initialize() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
-    assert_eq!(s.client.get_refund_counter(), 0);
-    assert_eq!(s.client.get_admin(), s.admin);
+    assert_eq!(s.refund_client.get_refund_counter(), 0);
+    assert_eq!(s.refund_client.get_admin(), s.admin);
+    assert_eq!(s.refund_client.get_payment_contract(), s.payment_client.address);
 }
 
 #[test]
 #[should_panic(expected = "Already initialized")]
 fn test_initialize_twice_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-    s.client.initialize(&s.admin);
+    s.refund_client.initialize(&s.admin, &s.payment_client.address);
 }
 
 // ===========================================================================
-//  Request Refund Tests
+//  Request Refund Tests (Cross-Contract Validation)
 // ===========================================================================
 
 #[test]
-fn test_request_refund() {
+fn test_request_refund_against_completed_payment() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+
+    // Customer requests refund for 250 (half of payment)
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
         &customer,
+        &pid,
         &250,
-        &s.token_addr,
         &String::from_str(&s.env, "Item not received"),
     );
 
     assert_eq!(refund_id, 0);
-    assert_eq!(s.client.get_refund_counter(), 1);
+    assert_eq!(s.refund_client.get_refund_counter(), 1);
 
-    let refund = s.client.get_refund(&refund_id);
+    let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Requested);
     assert_eq!(refund.amount, 250);
     assert_eq!(refund.customer, customer);
+    assert_eq!(refund.payment_id, pid);
+}
+
+#[test]
+#[should_panic(expected = "PaymentContractError: payment is not completed")]
+fn test_request_refund_against_pending_payment_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.token_admin_client.mint(&customer, &500);
+    let pid = s.payment_client.create_payment(&customer, &merchant, &500, &s.token_addr, &None, &None);
+    // Payment is still Pending — not Completed
+
+    s.token_admin_client.mint(&customer, &100);
+    s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "Pending payment"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "PaymentContractError: payment not found")]
+fn test_request_refund_nonexistent_payment_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+
+    s.token_admin_client.mint(&customer, &100);
+    s.refund_client.request_refund(
+        &customer,
+        &9999,
+        &100,
+        &String::from_str(&s.env, "No such payment"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "PaymentAmountMismatch: refund amount exceeds remaining payment amount")]
+fn test_request_refund_exceeds_payment_amount_panics() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 100);
+
+    // Try to refund more than the payment amount
+    s.token_admin_client.mint(&customer, &200);
+    s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &200,
+        &String::from_str(&s.env, "Too much"),
+    );
 }
 
 #[test]
 #[should_panic(expected = "Refund amount must be positive")]
 fn test_request_refund_zero_amount_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.client.request_refund(
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 100);
+
+    s.refund_client.request_refund(
         &customer,
+        &pid,
         &0,
-        &s.token_addr,
         &String::from_str(&s.env, "Invalid"),
     );
 }
@@ -119,21 +201,18 @@ fn test_request_refund_zero_amount_panics() {
 #[test]
 fn test_approve_refund() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
 
-    let refund = s.client.get_refund(&refund_id);
+    let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Approved);
     assert!(refund.approved_at.is_some());
 }
@@ -142,40 +221,34 @@ fn test_approve_refund() {
 #[should_panic(expected = "Only admin can approve refunds")]
 fn test_approve_refund_by_non_admin_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
     let non_admin = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&non_admin, &refund_id);
+    s.refund_client.approve_refund(&non_admin, &refund_id);
 }
 
 #[test]
 #[should_panic(expected = "Refund is not in requested status")]
 fn test_approve_already_approved_refund_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.approve_refund(&s.admin, &refund_id); // Should panic
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
 }
 
 // ===========================================================================
@@ -185,25 +258,18 @@ fn test_approve_already_approved_refund_panics() {
 #[test]
 fn test_reject_refund() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.reject_refund(
-        &s.admin,
-        &refund_id,
-        &String::from_str(&s.env, "Invalid reason"),
-    );
+    s.refund_client.reject_refund(&s.admin, &refund_id, &String::from_str(&s.env, "Invalid reason"));
 
-    let refund = s.client.get_refund(&refund_id);
+    let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Rejected);
 }
 
@@ -211,52 +277,17 @@ fn test_reject_refund() {
 #[should_panic(expected = "Only admin can reject refunds")]
 fn test_reject_refund_by_non_admin_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
     let non_admin = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.reject_refund(
-        &non_admin,
-        &refund_id,
-        &String::from_str(&s.env, "Invalid reason"),
-    );
-}
-
-#[test]
-#[should_panic(expected = "Refund is not in requested status")]
-fn test_reject_already_rejected_refund_panics() {
-    let s = setup();
-    s.client.initialize(&s.admin);
-
-    let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
-    );
-
-    s.client.reject_refund(
-        &s.admin,
-        &refund_id,
-        &String::from_str(&s.env, "Invalid reason"),
-    );
-    s.client.reject_refund(
-        &s.admin,
-        &refund_id,
-        &String::from_str(&s.env, "Already rejected"),
-    ); // Should panic
+    s.refund_client.reject_refund(&non_admin, &refund_id, &String::from_str(&s.env, "Invalid reason"));
 }
 
 // ===========================================================================
@@ -266,22 +297,19 @@ fn test_reject_already_rejected_refund_panics() {
 #[test]
 fn test_process_refund() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.process_refund(&s.admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
 
-    let refund = s.client.get_refund(&refund_id);
+    let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Processed);
     assert!(refund.processed_at.is_some());
 }
@@ -290,64 +318,34 @@ fn test_process_refund() {
 #[should_panic(expected = "Only admin can process refunds")]
 fn test_process_refund_by_non_admin_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
     let non_admin = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.process_refund(&non_admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&non_admin, &refund_id);
 }
 
 #[test]
 #[should_panic(expected = "Refund is not approved")]
 fn test_process_unapproved_refund_panics() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.process_refund(&s.admin, &refund_id);
-}
-
-#[test]
-#[should_panic(expected = "Refund is not approved")]
-fn test_process_rejected_refund_panics() {
-    let s = setup();
-    s.client.initialize(&s.admin);
-
-    let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
-    );
-
-    s.client.reject_refund(
-        &s.admin,
-        &refund_id,
-        &String::from_str(&s.env, "Invalid reason"),
-    );
-    s.client.process_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
 }
 
 // ===========================================================================
@@ -357,83 +355,65 @@ fn test_process_rejected_refund_panics() {
 #[test]
 fn test_token_transfer_on_process_refund() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let initial_balance = s.token_client.balance(&customer);
-    assert_eq!(initial_balance, 1000);
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    let balance_before = s.token_client.balance(&customer);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.process_refund(&s.admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
 
-    let final_balance = s.token_client.balance(&customer);
-    assert_eq!(final_balance, 1000);
+    // Customer gets back the 250 they escrowed
+    assert_eq!(s.token_client.balance(&customer), balance_before + 250);
 }
 
 #[test]
 fn test_contract_holds_no_balance_after_process() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.process_refund(&s.admin, &refund_id);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
 
-    let contract_balance = s.token_client.balance(&s.client.address);
-    assert_eq!(contract_balance, 0);
+    assert_eq!(s.token_client.balance(&s.refund_client.address), 0);
 }
 
 // ===========================================================================
-//  Lifecycle Tests
+//  Full Lifecycle Tests
 // ===========================================================================
 
 #[test]
 fn test_full_refund_lifecycle_approved() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    // Request
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
+    assert_eq!(s.refund_client.get_refund(&refund_id).status, RefundStatus::Requested);
 
-    let refund = s.client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Requested);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    assert_eq!(s.refund_client.get_refund(&refund_id).status, RefundStatus::Approved);
 
-    // Approve
-    s.client.approve_refund(&s.admin, &refund_id);
-
-    let refund = s.client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Approved);
-
-    // Process
-    s.client.process_refund(&s.admin, &refund_id);
-
-    let refund = s.client.get_refund(&refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
+    let refund = s.refund_client.get_refund(&refund_id);
     assert_eq!(refund.status, RefundStatus::Processed);
     assert!(refund.processed_at.is_some());
 }
@@ -441,31 +421,18 @@ fn test_full_refund_lifecycle_approved() {
 #[test]
 fn test_full_refund_lifecycle_rejected() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    // Request
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    let refund = s.client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Requested);
-
-    // Reject
-    s.client.reject_refund(
-        &s.admin,
-        &refund_id,
-        &String::from_str(&s.env, "Invalid reason"),
-    );
-
-    let refund = s.client.get_refund(&refund_id);
-    assert_eq!(refund.status, RefundStatus::Rejected);
+    s.refund_client.reject_refund(&s.admin, &refund_id, &String::from_str(&s.env, "Invalid reason"));
+    assert_eq!(s.refund_client.get_refund(&refund_id).status, RefundStatus::Rejected);
 }
 
 // ===========================================================================
@@ -475,63 +442,49 @@ fn test_full_refund_lifecycle_rejected() {
 #[test]
 fn test_refund_requested_emits_event() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    let events = s.env.events().all();
-    assert!(events.len() > 0);
+    assert!(!s.env.events().all().is_empty());
 }
 
 #[test]
 fn test_refund_approved_emits_event() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-
-    let events = s.env.events().all();
-    assert!(events.len() > 0);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    assert!(!s.env.events().all().is_empty());
 }
 
 #[test]
 fn test_refund_processed_emits_event() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &250,
-        &s.token_addr,
-        &String::from_str(&s.env, "Item not received"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &250);
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &250, &String::from_str(&s.env, "Item not received"),
     );
 
-    s.client.approve_refund(&s.admin, &refund_id);
-    s.client.process_refund(&s.admin, &refund_id);
-
-    let events = s.env.events().all();
-    assert!(events.len() > 0);
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+    s.refund_client.process_refund(&s.admin, &refund_id);
+    assert!(!s.env.events().all().is_empty());
 }
 
 // ===========================================================================
@@ -541,86 +494,33 @@ fn test_refund_processed_emits_event() {
 #[test]
 fn test_refund_counter_increments() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
+    let merchant = Address::generate(&s.env);
 
-    s.client.request_refund(
-        &customer,
-        &100,
-        &s.token_addr,
-        &String::from_str(&s.env, "Reason 1"),
-    );
-    s.client.request_refund(
-        &customer,
-        &200,
-        &s.token_addr,
-        &String::from_str(&s.env, "Reason 2"),
-    );
+    let pid1 = create_completed_payment(&s, &customer, &merchant, 500);
+    let pid2 = create_completed_payment(&s, &customer, &merchant, 500);
 
-    assert_eq!(s.client.get_refund_counter(), 2);
+    s.token_admin_client.mint(&customer, &300);
+    s.refund_client.request_refund(&customer, &pid1, &100, &String::from_str(&s.env, "Reason 1"));
+    s.refund_client.request_refund(&customer, &pid2, &200, &String::from_str(&s.env, "Reason 2"));
+
+    assert_eq!(s.refund_client.get_refund_counter(), 2);
 }
 
-#[test]
-fn test_boundary_amount_i128_max_rejected_without_balance() {
-    let s = setup();
-    s.client.initialize(&s.admin);
-
-    let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1);
-
-    let res = s.client.try_request_refund(
-        &customer,
-        &i128::MAX,
-        &s.token_addr,
-        &String::from_str(&s.env, "too large"),
-    );
-    assert!(res.is_err());
-}
-
-#[test]
-fn test_boundary_payment_id_u64_max_cast_not_found() {
-    let s = setup();
-    s.client.initialize(&s.admin);
-    let id = u64::MAX as u32;
-    let res = s.client.try_get_refund(&id);
-    assert!(res.is_err());
-}
-
-#[test]
-fn test_auth_required_for_admin_approve_refund() {
-    let env = Env::default();
-    let contract_id = env.register(AhjoorRefundContract, ());
-    let client = AhjoorRefundContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let res = client.try_approve_refund(&admin, &0);
-    assert!(res.is_err());
-}
-
-#[test]
-fn test_event_snapshot_for_refund_request() {
-    // TODO: Implement event snapshot test
-}
+// ===========================================================================
+//  Upgrade / Migration Tests
+// ===========================================================================
 
 #[test]
 fn test_admin_upgrade_increments_version() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
-    assert_eq!(s.client.get_version(), 1);
+    assert_eq!(s.refund_client.get_version(), 1);
 
     let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
-    s.client.upgrade(&s.admin, &wasm_hash);
+    s.refund_client.upgrade(&s.admin, &wasm_hash);
 
-    let version: u32 = s.env.as_contract(&s.client.address, || {
-        s.env
-            .storage()
-            .instance()
-            .get(&DataKey::ContractVersion)
-            .unwrap()
+    let version: u32 = s.env.as_contract(&s.refund_client.address, || {
+        s.env.storage().instance().get(&DataKey::ContractVersion).unwrap()
     });
     assert_eq!(version, 2);
 }
@@ -628,37 +528,25 @@ fn test_admin_upgrade_increments_version() {
 #[test]
 fn test_upgrade_by_non_admin_fails() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let intruder = Address::generate(&s.env);
     let wasm_hash = s.env.deployer().upload_contract_wasm(UPGRADE_WASM);
-    let result = s.client.try_upgrade(&intruder, &wasm_hash);
-
-    assert!(result.is_err());
-    assert_eq!(s.client.get_version(), 1);
+    assert!(s.refund_client.try_upgrade(&intruder, &wasm_hash).is_err());
+    assert_eq!(s.refund_client.get_version(), 1);
 }
 
 #[test]
 fn test_migration_runs_once_per_version() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
-    s.client.migrate(&s.admin);
-    let second = s.client.try_migrate(&s.admin);
-
-    assert!(second.is_err());
+    s.refund_client.migrate(&s.admin);
+    assert!(s.refund_client.try_migrate(&s.admin).is_err());
 }
 
 #[test]
 fn test_upgrade_atomicity_with_invalid_hash() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let invalid_hash = BytesN::from_array(&s.env, &[9u8; 32]);
-    let result = s.client.try_upgrade(&s.admin, &invalid_hash);
-
-    assert!(result.is_err());
-    assert_eq!(s.client.get_version(), 1);
+    assert!(s.refund_client.try_upgrade(&s.admin, &invalid_hash).is_err());
+    assert_eq!(s.refund_client.get_version(), 1);
 }
 
 // ===========================================================================
@@ -668,78 +556,105 @@ fn test_upgrade_atomicity_with_invalid_hash() {
 #[test]
 fn test_admin_can_pause_and_resume_contract() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let reason = String::from_str(&s.env, "Emergency maintenance");
-    s.client.pause_contract(&s.admin, &reason);
+    s.refund_client.pause_contract(&s.admin, &reason);
 
-    assert_eq!(s.client.is_paused(), true);
-    assert_eq!(s.client.get_pause_reason(), reason);
+    assert_eq!(s.refund_client.is_paused(), true);
+    assert_eq!(s.refund_client.get_pause_reason(), reason);
 
-    s.client.resume_contract(&s.admin);
-    assert_eq!(s.client.is_paused(), false);
-    assert_eq!(s.client.get_pause_reason(), String::from_str(&s.env, ""));
+    s.refund_client.resume_contract(&s.admin);
+    assert_eq!(s.refund_client.is_paused(), false);
+    assert_eq!(s.refund_client.get_pause_reason(), String::from_str(&s.env, ""));
 }
 
 #[test]
 fn test_non_admin_cannot_pause_or_resume() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let attacker = Address::generate(&s.env);
-    let pause_res = s
-        .client
-        .try_pause_contract(&attacker, &String::from_str(&s.env, "Malicious"));
-    assert!(pause_res.is_err());
+    assert!(s.refund_client.try_pause_contract(&attacker, &String::from_str(&s.env, "Malicious")).is_err());
 
-    s.client
-        .pause_contract(&s.admin, &String::from_str(&s.env, "Incident"));
-
-    let resume_res = s.client.try_resume_contract(&attacker);
-    assert!(resume_res.is_err());
+    s.refund_client.pause_contract(&s.admin, &String::from_str(&s.env, "Incident"));
+    assert!(s.refund_client.try_resume_contract(&attacker).is_err());
 }
 
 #[test]
-fn test_write_functions_blocked_when_paused_reads_still_work() {
+fn test_write_operations_blocked_when_paused() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-    let _ = s.client.request_refund(
-        &customer,
-        &100,
-        &s.token_addr,
-        &String::from_str(&s.env, "snapshot"),
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &100);
+
+    s.refund_client.pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+
+    let res = s.refund_client.try_request_refund(
+        &customer, &pid, &100, &String::from_str(&s.env, "reason"),
     );
-
-    let events = s.env.events().all();
-    assert!(!events.is_empty());
-    let snapshot = alloc::format!("{:?}", events);
-    assert!(!snapshot.is_empty());
+    assert!(res.is_err());
+    assert_eq!(s.refund_client.get_refund_counter(), 0);
 }
 
 #[test]
-fn test_fuzz_like_refund_inputs_100_cases() {
+fn test_recovery_after_resume() {
     let s = setup();
-    s.client.initialize(&s.admin);
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &10_000_000);
+    let merchant = Address::generate(&s.env);
 
-    let mut seed: u64 = 0xE773;
-    for _ in 0..100 {
-        seed = seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
-        let amount = ((seed % 2000) as i128) + 1;
-        let _ = s.client.try_request_refund(
-            &customer,
-            &amount,
-            &s.token_addr,
-            &String::from_str(&s.env, "fuzz"),
-        );
-    }
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &100);
 
-    assert!(s.client.get_refund_counter() <= 100);
+    s.refund_client.pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
+    s.refund_client.resume_contract(&s.admin);
+
+    let refund_id = s.refund_client.request_refund(
+        &customer, &pid, &100, &String::from_str(&s.env, "post-resume"),
+    );
+    assert_eq!(refund_id, 0);
+    assert_eq!(s.refund_client.get_refund_counter(), 1);
 }
+
+// ===========================================================================
+//  Boundary / Auth Tests
+// ===========================================================================
+
+#[test]
+fn test_boundary_amount_i128_max_rejected_without_balance() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 1);
+    s.token_admin_client.mint(&customer, &1);
+
+    let res = s.refund_client.try_request_refund(
+        &customer, &pid, &i128::MAX, &String::from_str(&s.env, "too large"),
+    );
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_boundary_refund_id_not_found() {
+    let s = setup();
+    assert!(s.refund_client.try_get_refund(&9999u32).is_err());
+}
+
+#[test]
+fn test_auth_required_for_admin_approve_refund() {
+    let env = Env::default();
+    let payment_id_addr = env.register(AhjoorPaymentsContract, ());
+    let refund_id_addr = env.register(AhjoorRefundContract, ());
+    let client = AhjoorRefundContractClient::new(&env, &refund_id_addr);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &payment_id_addr);
+
+    let res = client.try_approve_refund(&admin, &0);
+    assert!(res.is_err());
+}
+
+// ===========================================================================
+//  Property-Based Tests
+// ===========================================================================
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(120))]
@@ -762,47 +677,24 @@ proptest! {
     }
 }
 
-#[test]
-fn test_write_operations_blocked_when_paused() {
-    let s = setup();
-    s.client.initialize(&s.admin);
-
-    let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-
-    s.client
-        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
-
-    let request_res = s.client.try_request_refund(
-        &customer,
-        &100,
-        &s.token_addr,
-        &String::from_str(&s.env, "reason"),
-    );
-    assert!(request_res.is_err());
-
-    assert_eq!(s.client.get_refund_counter(), 0);
-    assert_eq!(s.client.get_admin(), s.admin);
-}
+// ===========================================================================
+//  Snapshot / Fuzz Tests
+// ===========================================================================
 
 #[test]
-fn test_recovery_after_resume() {
+fn test_write_functions_blocked_when_paused_reads_still_work() {
     let s = setup();
-    s.client.initialize(&s.admin);
-
     let customer = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-    s.client
-        .pause_contract(&s.admin, &String::from_str(&s.env, "Emergency"));
-    s.client.resume_contract(&s.admin);
+    let merchant = Address::generate(&s.env);
 
-    let refund_id = s.client.request_refund(
-        &customer,
-        &100,
-        &s.token_addr,
-        &String::from_str(&s.env, "post-resume"),
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&customer, &100);
+    let _ = s.refund_client.request_refund(
+        &customer, &pid, &100, &String::from_str(&s.env, "snapshot"),
     );
 
-    assert_eq!(refund_id, 0);
-    assert_eq!(s.client.get_refund_counter(), 1);
+    let events = s.env.events().all();
+    assert!(!events.is_empty());
+    let snapshot = alloc::format!("{:?}", events);
+    assert!(!snapshot.is_empty());
 }

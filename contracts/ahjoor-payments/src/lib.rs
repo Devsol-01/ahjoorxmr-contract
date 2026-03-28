@@ -1,8 +1,9 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, BytesN,
+    contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Bytes, BytesN,
     Env, Map, String, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 
 /// Maximum length (bytes) for the optional payment reference string.
 const MAX_REFERENCE_LEN: u32 = 64;

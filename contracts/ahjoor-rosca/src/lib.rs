@@ -376,7 +376,7 @@ impl AhjoorContract {
             .get(&DataKey::RoundDeadline)
             .expect("Deadline not set");
         if env.ledger().timestamp() > deadline {
-            panic_with_error!(&env, Error::RoundDeadlinePassed);
+            panic_with_error!(&env, Error::ContributionWindowClosed);
         }
 
         let exited_members: Vec<Address> = env
@@ -630,6 +630,108 @@ impl AhjoorContract {
         events::emit_closed(&env, current_round, defaulters);
 
         internals::reset_round_state(&env, current_round);
+    }
+
+    /// Finalize a round once its deadline has passed.
+    ///
+    /// Unlike `close_round` (which only resets state), this function also:
+    /// - Identifies non-contributors as delinquent and increments their default count
+    /// - Suspends members after 3 consecutive missed rounds
+    /// - Executes the payout with whatever funds have been collected
+    ///
+    /// Admin only. Panics with `DeadlineNotPassed` if called before the deadline.
+    pub fn finalize_round(env: Env) {
+        internals::check_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+
+        let deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDeadline)
+            .unwrap();
+        if env.ledger().timestamp() <= deadline {
+            panic_with_error!(&env, Error::DeadlineNotPassed);
+        }
+
+        let members: Vec<Address> = env.storage().instance().get(&DataKey::Members).unwrap();
+        let paid_members: Vec<Address> =
+            env.storage().instance().get(&DataKey::PaidMembers).unwrap();
+        let exited_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitedMembers)
+            .unwrap_or(Vec::new(&env));
+
+        let current_round: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CurrentRound)
+            .unwrap_or(0);
+        let penalty_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PenaltyAmount)
+            .unwrap_or(0);
+
+        let mut default_count: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultCount)
+            .unwrap_or(Map::new(&env));
+        let mut suspended_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuspendedMembers)
+            .unwrap_or(Vec::new(&env));
+
+        // Identify defaulters (non-contributors, non-exited)
+        let mut defaulters: Vec<Address> = Vec::new(&env);
+        for member in members.iter() {
+            if !paid_members.contains(&member) && !exited_members.contains(&member) {
+                defaulters.push_back(member.clone());
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Defaulters, &defaulters);
+
+        events::emit_round_finalized(&env, current_round, defaulters.clone());
+
+        // Execute payout BEFORE applying new suspensions so the recipient selection
+        // uses the pre-round suspension state (newly delinquent members don't affect
+        // this round's payout).
+        internals::complete_round_payout(&env, &paid_members);
+
+        // Apply default tracking and suspensions after the payout
+        for member in defaulters.iter() {
+            let count = default_count.get(member.clone()).unwrap_or(0) + 1;
+            default_count.set(member.clone(), count);
+
+            events::emit_defaulted(&env, member.clone(), current_round, penalty_amount, count);
+
+            // Suspend after 3 consecutive missed rounds
+            if count >= 3 && !suspended_members.contains(&member) {
+                suspended_members.push_back(member.clone());
+                events::emit_suspended(&env, member.clone(), count);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultCount, &default_count);
+        env.storage()
+            .instance()
+            .set(&DataKey::SuspendedMembers, &suspended_members);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     pub fn penalise_defaulter(env: Env, member: Address) {
@@ -1345,6 +1447,11 @@ impl AhjoorContract {
                 .get(&DataKey::PaidMembers)
                 .unwrap_or(Vec::new(&env)),
             next_recipient,
+            round_deadline: env
+                .storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap_or(0),
         }
     }
 
@@ -1811,26 +1918,13 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap_or(0);
-        let contribution_amount: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ContributionAmt)
-            .unwrap_or(0);
-        let exit_penalty_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExitPenaltyBps)
-            .unwrap_or(0);
 
-        let total_contributed = contribution_amount * (current_round as i128);
-        let penalty_amount = total_contributed * (exit_penalty_bps as i128) / 10_000;
-        let refund_amount = total_contributed - penalty_amount;
-
+        // penalty_amount and refund_amount are computed dynamically in approve_exit
+        // based on round history and current exit_penalty_bps — not pre-calculated here.
         let request = ExitRequest {
             member: member.clone(),
             rounds_contributed: current_round,
-            penalty_amount,
-            refund_amount,
+            refund_amount: 0,
             approved: false,
         };
         requests.set(member.clone(), request);
@@ -1843,7 +1937,7 @@ impl AhjoorContract {
             TEMP_BUMP_AMOUNT,
         );
 
-        events::emit_exit_req(&env, member.clone(), current_round, refund_amount);
+        events::emit_exit_req(&env, member.clone(), current_round);
 
         env.storage()
             .instance()
@@ -1869,14 +1963,42 @@ impl AhjoorContract {
         }
         let request = requests.get(member.clone()).unwrap();
 
-        if request.refund_amount > 0 {
+        // Compute penalty and refund dynamically based on current state.
+        // This ensures members who already received a payout round are penalized on net balance.
+        let contribution_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContributionAmt)
+            .unwrap_or(0);
+        let exit_penalty_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExitPenaltyBps)
+            .unwrap_or(0);
+
+        let contributed_total = contribution_amount * (request.rounds_contributed as i128);
+
+        // Sum payouts the member has received from round history
+        let history: Vec<PayoutRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoundHistory)
+            .unwrap_or(Vec::new(&env));
+        let mut received_payout = 0i128;
+        for record in history.iter() {
+            if record.recipient == member {
+                received_payout += record.amount;
+            }
+        }
+
+        let penalty = contributed_total * (exit_penalty_bps as i128) / 10_000;
+        let net = contributed_total - received_payout - penalty;
+        let refund_amount = if net > 0 { net } else { 0 };
+
+        if refund_amount > 0 {
             let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
             let client = token::Client::new(&env, &token_addr);
-            client.transfer(
-                &env.current_contract_address(),
-                &member,
-                &request.refund_amount,
-            );
+            client.transfer(&env.current_contract_address(), &member, &refund_amount);
         }
 
         // Remove from Members list
@@ -1911,7 +2033,7 @@ impl AhjoorContract {
             .temporary()
             .set(&DataKey::ExitRequests, &requests);
 
-        events::emit_exit_ok(&env, member.clone(), request.refund_amount);
+        events::emit_exit_ok(&env, member.clone(), refund_amount);
 
         env.storage()
             .instance()

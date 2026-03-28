@@ -66,6 +66,15 @@ pub struct ContractResumed {
     pub timestamp: u64,
 }
 
+/// Event: Refund auto-approved after dispute window elapsed without merchant response
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAutoApproved {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_refund_requested(
@@ -135,6 +144,15 @@ pub fn emit_contract_upgraded(e: &Env, old_version: u32, new_version: u32, by_ad
     }
     .publish(e);
 }
+pub fn emit_refund_auto_approved(e: &Env, refund_id: u32, customer: Address, amount: i128) {
+    RefundAutoApproved {
+        refund_id,
+        customer,
+        amount,
+    }
+    .publish(e);
+}
+
 pub fn emit_contract_paused(e: &Env, admin: Address, reason: String, timestamp: u64) {
     ContractPaused {
         admin,

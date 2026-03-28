@@ -90,6 +90,8 @@ pub enum DataKey {
     MerchantRefunds(Address),
     /// Index: payment_id → Vec<u32> of refund IDs
     PaymentRefunds(u32),
+    /// Dispute window in seconds; after this period a Requested refund can be auto-approved.
+    DisputeWindow,
 }
 
 mod events;
@@ -99,8 +101,15 @@ pub struct AhjoorRefundContract;
 
 #[contractimpl]
 impl AhjoorRefundContract {
-    /// Initialize the refund contract with an admin and the payment contract address.
-    pub fn initialize(env: Env, admin: Address, payment_contract: Address) {
+    /// Initialize the refund contract with an admin, the payment contract address, and a
+    /// `dispute_window` (in seconds). After `dispute_window` seconds have elapsed since a
+    /// refund was requested without any merchant action, anyone may call `auto_approve_refund`.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        payment_contract: Address,
+        dispute_window: u64,
+    ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("Already initialized");
         }
@@ -113,6 +122,9 @@ impl AhjoorRefundContract {
         env.storage()
             .instance()
             .set(&DataKey::PaymentContractAddress, &payment_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeWindow, &dispute_window);
 
         env.storage()
             .instance()
@@ -359,6 +371,67 @@ impl AhjoorRefundContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Auto-approve a refund once the dispute window has elapsed without merchant action.
+    /// Callable by anyone. Panics if the merchant has already approved or rejected the refund,
+    /// or if the dispute window has not yet elapsed.
+    pub fn auto_approve_refund(env: Env, refund_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::Requested {
+            panic!("Refund has already been acted on");
+        }
+
+        let dispute_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeWindow)
+            .expect("Dispute window not configured");
+
+        let now = env.ledger().timestamp();
+        if now < refund.requested_at + dispute_window {
+            panic!("Dispute window has not elapsed");
+        }
+
+        let client = token::Client::new(&env, &refund.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &refund.customer,
+            &refund.amount,
+        );
+
+        refund.status = RefundStatus::Processed;
+        refund.processed_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_refund_auto_approved(&env, refund_id, refund.customer, refund.amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the configured dispute window in seconds.
+    pub fn get_dispute_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeWindow)
+            .expect("Dispute window not configured")
     }
 
     /// Get refund details

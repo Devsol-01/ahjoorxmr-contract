@@ -5,7 +5,7 @@ use proptest::prelude::*;
 use soroban_sdk::token::Client as TokenClient;
 use soroban_sdk::token::StellarAssetClient as TokenAdminClient;
 use soroban_sdk::{
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger},
     Address, BytesN, Env, Map, String,
 };
 
@@ -50,9 +50,9 @@ fn setup<'a>() -> TestSetup<'a> {
     let token_client = TokenClient::new(&env, &token_addr);
     let token_admin_client = TokenAdminClient::new(&env, &token_addr);
 
-    // Initialize both contracts
+    // Initialize both contracts — 86400 s (1 day) dispute window
     payment_client.initialize(&admin);
-    refund_client.initialize(&admin, &payment_id);
+    refund_client.initialize(&admin, &payment_id, &86_400u64);
 
     TestSetup {
         env,
@@ -100,7 +100,7 @@ fn test_initialize() {
 fn test_initialize_twice_panics() {
     let s = setup();
     s.refund_client
-        .initialize(&s.admin, &s.payment_client.address);
+        .initialize(&s.admin, &s.payment_client.address, &86_400u64);
 }
 
 // ===========================================================================
@@ -752,7 +752,7 @@ fn test_auth_required_for_admin_approve_refund() {
     let refund_id_addr = env.register(AhjoorRefundContract, ());
     let client = AhjoorRefundContractClient::new(&env, &refund_id_addr);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &payment_id_addr);
+    client.initialize(&admin, &payment_id_addr, &86_400u64);
 
     let res = client.try_approve_refund(&admin, &0);
     assert!(res.is_err());
@@ -1073,4 +1073,178 @@ fn test_write_functions_blocked_when_paused_reads_still_work() {
     assert!(!events.is_empty());
     let snapshot = alloc::format!("{:?}", events);
     assert!(!snapshot.is_empty());
+}
+
+// ===========================================================================
+//  Auto-Approve Refund Tests (dispute window)
+// ===========================================================================
+
+/// Helper: create a setup with a custom dispute_window.
+fn setup_with_dispute_window<'a>(dispute_window: u64) -> TestSetup<'a> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let payment_id = env.register(AhjoorPaymentsContract, ());
+    let payment_client = AhjoorPaymentsContractClient::new(&env, &payment_id);
+
+    let refund_id = env.register(AhjoorRefundContract, ());
+    let refund_client = AhjoorRefundContractClient::new(&env, &refund_id);
+
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_client = TokenClient::new(&env, &token_addr);
+    let token_admin_client = TokenAdminClient::new(&env, &token_addr);
+
+    payment_client.initialize(&admin);
+    refund_client.initialize(&admin, &payment_id, &dispute_window);
+
+    TestSetup {
+        env,
+        refund_client,
+        payment_client,
+        admin,
+        token_addr,
+        token_client,
+        token_admin_client,
+    }
+}
+
+#[test]
+fn test_get_dispute_window_returns_configured_value() {
+    let s = setup_with_dispute_window(3600);
+    assert_eq!(s.refund_client.get_dispute_window(), 3600);
+}
+
+#[test]
+#[should_panic(expected = "Dispute window has not elapsed")]
+fn test_auto_approve_early_panics() {
+    let s = setup_with_dispute_window(86_400);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    // Ledger starts at timestamp 0; request at t=0
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 100);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "missing item"),
+    );
+
+    // Only 1 hour has passed — window is 1 day
+    s.env.ledger().set_timestamp(3600);
+    s.refund_client.auto_approve_refund(&refund_id);
+}
+
+#[test]
+#[should_panic(expected = "Refund has already been acted on")]
+fn test_auto_approve_after_merchant_approved_panics() {
+    let s = setup_with_dispute_window(86_400);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 100);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "broken"),
+    );
+
+    // Admin approves before the window elapses
+    s.refund_client.approve_refund(&s.admin, &refund_id);
+
+    // Advance past the dispute window
+    s.env.ledger().set_timestamp(86_401);
+    // Should panic because merchant already acted
+    s.refund_client.auto_approve_refund(&refund_id);
+}
+
+#[test]
+#[should_panic(expected = "Refund has already been acted on")]
+fn test_auto_approve_after_merchant_rejected_panics() {
+    let s = setup_with_dispute_window(86_400);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 100);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "broken"),
+    );
+
+    // Admin rejects before the window elapses
+    s.refund_client.reject_refund(
+        &s.admin,
+        &refund_id,
+        &String::from_str(&s.env, "not valid"),
+    );
+
+    // Advance past the dispute window
+    s.env.ledger().set_timestamp(86_401);
+    s.refund_client.auto_approve_refund(&refund_id);
+}
+
+#[test]
+fn test_auto_approve_after_window_transfers_tokens_and_sets_processed() {
+    let s = setup_with_dispute_window(86_400);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 200);
+    s.token_admin_client.mint(&customer, &100);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &100,
+        &String::from_str(&s.env, "no response"),
+    );
+
+    // Verify tokens are in escrow
+    let balance_before = s.token_client.balance(&customer);
+
+    // Advance exactly to the boundary: requested_at(0) + dispute_window(86400) = 86400
+    s.env.ledger().set_timestamp(86_400);
+    s.refund_client.auto_approve_refund(&refund_id);
+
+    let refund = s.refund_client.get_refund(&refund_id);
+    assert_eq!(refund.status, RefundStatus::Processed);
+    assert_eq!(refund.processed_at, Some(86_400));
+
+    // Customer received the tokens back
+    assert_eq!(s.token_client.balance(&customer), balance_before + 100);
+}
+
+#[test]
+fn test_auto_approve_emits_event() {
+    let s = setup_with_dispute_window(3600);
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(0);
+    let pid = create_completed_payment(&s, &customer, &merchant, 50);
+    s.token_admin_client.mint(&customer, &50);
+    let refund_id = s.refund_client.request_refund(
+        &customer,
+        &pid,
+        &50,
+        &String::from_str(&s.env, "auto"),
+    );
+
+    s.env.ledger().set_timestamp(3601);
+    s.refund_client.auto_approve_refund(&refund_id);
+
+    let events = s.env.events().all();
+    assert!(!events.is_empty());
 }

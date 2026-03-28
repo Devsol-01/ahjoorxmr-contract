@@ -206,13 +206,20 @@ pub struct ContractResumed {
     pub reason: soroban_sdk::String,
 }
 
+/// Event: Round finalized by admin after deadline (payout executed with partial contributions)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundFinalized {
+    pub round: u32,
+    pub defaulters: Vec<Address>,
+}
+
 /// Event: Emergency exit requested
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct ExitRequested {
     pub member: Address,
     pub round: u32,
-    pub refund_amount: i128,
 }
 
 /// Event: Emergency exit approved
@@ -459,13 +466,12 @@ pub fn emit_resumed(e: &Env, reason: soroban_sdk::String) {
     ContractResumed { reason }.publish(e);
 }
 
-pub fn emit_exit_req(e: &Env, member: Address, round: u32, refund_amount: i128) {
-    ExitRequested {
-        member,
-        round,
-        refund_amount,
-    }
-    .publish(e);
+pub fn emit_round_finalized(e: &Env, round: u32, defaulters: Vec<Address>) {
+    RoundFinalized { round, defaulters }.publish(e);
+}
+
+pub fn emit_exit_req(e: &Env, member: Address, round: u32) {
+    ExitRequested { member, round }.publish(e);
 }
 
 pub fn emit_exit_ok(e: &Env, member: Address, refund_amount: i128) {

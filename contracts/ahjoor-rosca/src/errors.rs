@@ -35,4 +35,6 @@ pub enum Error {
     ExitRequestPending = 30,
     NoExitRequestFound = 31,
     ExitNotAllowedMidRound = 32,
+    /// Contribution rejected because the round deadline has passed.
+    ContributionWindowClosed = 33,
 }

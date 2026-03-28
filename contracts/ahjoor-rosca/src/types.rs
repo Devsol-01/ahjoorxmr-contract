@@ -36,6 +36,8 @@ pub struct GroupInfo {
     pub total_rounds: u32,
     pub paid_members: Vec<Address>,
     pub next_recipient: Address,
+    /// Timestamp (seconds) by which all contributions for the current round must be received.
+    pub round_deadline: u64,
 }
 
 #[contracttype]
@@ -50,7 +52,8 @@ pub struct PayoutRecord {
 pub struct ExitRequest {
     pub member: Address,
     pub rounds_contributed: u32,
-    pub penalty_amount: i128,
+    /// Computed dynamically in `approve_exit` from rounds_contributed, payout history, and
+    /// exit_penalty_bps; not stored at request time.
     pub refund_amount: i128,
     pub approved: bool,
 }

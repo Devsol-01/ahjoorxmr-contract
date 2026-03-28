@@ -197,7 +197,10 @@ fn test_late_contribution_rejection() {
     let res = setup
         .client
         .try_contribute(&user1, &setup.token_admin, &100);
-    assert_eq!(res.unwrap_err().unwrap(), Error::RoundDeadlinePassed.into());
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        Error::ContributionWindowClosed.into()
+    );
 }
 
 #[test]
@@ -1754,9 +1757,9 @@ fn test_member_can_request_emergency_exit() {
 
     let req = requests.get(u1.clone()).unwrap();
     assert_eq!(req.member, u1);
-    // u1 has contributed 0 full rounds so far → refund = 0 - penalty = 0
+    // u1 has contributed 0 full rounds so far
     assert_eq!(req.rounds_contributed, 0);
-    assert_eq!(req.penalty_amount, 0);
+    // refund_amount is 0 at request time — computed dynamically in approve_exit
     assert_eq!(req.refund_amount, 0);
     assert!(!req.approved);
 }
@@ -1834,12 +1837,12 @@ fn test_admin_approves_exit_penalty_applied() {
 
     let req = client.get_exit_requests().get(u1.clone()).unwrap();
     assert_eq!(req.rounds_contributed, 1);
-    assert_eq!(req.penalty_amount, 10); // 10% of 100
-    assert_eq!(req.refund_amount, 90);
+    // refund_amount is 0 at request time — computed dynamically in approve_exit
+    assert_eq!(req.refund_amount, 0);
 
     client.approve_exit(&u1);
 
-    // u1 received the refund (90 returned, 10 stays as penalty in contract)
+    // u1 received the refund (90 returned = 100 contributed - 10% penalty)
     let u1_balance_after_exit = token_client.balance(&u1);
     assert_eq!(u1_balance_after_exit, u1_balance_before_exit + 90);
 
@@ -2021,10 +2024,11 @@ fn test_exit_with_zero_penalty() {
     client.request_emergency_exit(&u1);
 
     let req = client.get_exit_requests().get(u1.clone()).unwrap();
-    assert_eq!(req.penalty_amount, 0);
-    assert_eq!(req.refund_amount, 100); // full refund
+    // refund_amount is 0 at request time — computed dynamically in approve_exit
+    assert_eq!(req.refund_amount, 0);
 
     client.approve_exit(&u1);
+    // full refund: 100 contributed * 1 round, penalty = 0, no payout received
     assert_eq!(token_client.balance(&u1), u1_balance_before + 100);
 }
 
@@ -2052,13 +2056,9 @@ fn test_exit_request_event_emitted() {
         .unwrap()
         .into_val(&env);
     let round: u32 = data.get(Symbol::new(&env, "round")).unwrap().into_val(&env);
-    let refund_amount: i128 = data
-        .get(Symbol::new(&env, "refund_amount"))
-        .unwrap()
-        .into_val(&env);
+    // refund_amount was removed from ExitRequested event; only member and round are emitted
     assert_eq!(member, u1);
     assert_eq!(round, 0);
-    assert_eq!(refund_amount, 0);
 }
 
 // ---------------------------------------------------------------
@@ -3421,4 +3421,266 @@ fn test_upgrade_atomicity_invalid_hash() {
 
     assert!(result.is_err());
     assert_eq!(client.get_version(), 1);
+}
+
+// ===========================================================================
+//  finalize_round Tests
+// ===========================================================================
+
+/// Helper: set up a 3-member ROSCA with penalty tracking enabled (exit_penalty_bps = 1000).
+/// Returns (client, admin, u1, u2, u3, token_client, token_admin_addr).
+fn setup_finalize_env(
+    env: &Env,
+) -> (
+    AhjoorContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+    soroban_sdk::token::Client<'_>,
+    Address,
+) {
+    env.mock_all_auths();
+    let contract_id = env.register(AhjoorContract, ());
+    let client = AhjoorContractClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let token_admin_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin_client = soroban_sdk::token::StellarAssetClient::new(env, &token_admin_addr);
+    let token_client = soroban_sdk::token::Client::new(env, &token_admin_addr);
+
+    let u1 = Address::generate(env);
+    let u2 = Address::generate(env);
+    let u3 = Address::generate(env);
+
+    for u in [&u1, &u2, &u3] {
+        token_admin_client.mint(u, &3000);
+    }
+
+    let members = vec![env, u1.clone(), u2.clone(), u3.clone()];
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin_addr,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+
+    (client, admin, u1, u2, u3, token_client, token_admin_addr)
+}
+
+#[test]
+fn test_finalize_round_panics_before_deadline() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_finalize_env(&env);
+
+    // Deadline is at t = 3600. Calling at t = 3600 (not strictly past) should panic.
+    env.ledger().set_timestamp(3600);
+    let res = client.try_finalize_round();
+    assert_eq!(res.unwrap_err().unwrap(), Error::DeadlineNotPassed.into());
+}
+
+#[test]
+fn test_finalize_round_pays_out_partial_contributions() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, _u3, token_client, ta) = setup_finalize_env(&env);
+
+    // Only u1 contributes in round 0
+    client.contribute(&u1, &ta, &100);
+
+    // Advance past deadline
+    env.ledger().set_timestamp(3601);
+
+    let u1_balance_before = token_client.balance(&u1);
+
+    // u2 and u3 did NOT contribute; round 0 recipient is u1 (index 0 % 3 = 0)
+    client.finalize_round();
+
+    // u1 was the payout recipient and should have received all collected funds (100 tokens)
+    // u1 contributed 100, then received the pot which also contained only 100 (only u1 paid)
+    let u1_balance_after = token_client.balance(&u1);
+    assert!(u1_balance_after > u1_balance_before);
+
+    // Round advanced to 1
+    let (round, _, _, _, _) = client.get_state();
+    assert_eq!(round, 1);
+}
+
+#[test]
+fn test_finalize_round_tracks_defaulters_and_suspends_after_three_misses() {
+    let env = Env::default();
+    let (client, _admin, _u1, u2, _u3, _tc, _ta) = setup_finalize_env(&env);
+
+    // round_duration = 3600. Initialized at t=0, so deadline[0] = 3600.
+    // After finalize_round at timestamp T, new deadline = T + 3600.
+    // t=3601 -> finalize round 0; new deadline = 3601 + 3600 = 7201
+    // t=7202 -> finalize round 1; new deadline = 7202 + 3600 = 10802
+    // t=10803 -> finalize round 2; new deadline = ...
+    let finalize_timestamps = [3601u64, 7202u64, 10803u64];
+
+    for ts in finalize_timestamps {
+        env.ledger().set_timestamp(ts);
+        // No one contributes; finalize_round pays out with whatever is in the contract (0 here)
+        client.finalize_round();
+    }
+
+    // After 3 consecutive misses u2 should be suspended
+    let status = client.get_member_status(&u2);
+    assert!(
+        status.is_suspended,
+        "u2 should be suspended after 3 consecutive defaults"
+    );
+}
+
+#[test]
+fn test_finalize_round_get_group_info_round_deadline() {
+    let env = Env::default();
+    let (client, _admin, _u1, _u2, _u3, _tc, _ta) = setup_finalize_env(&env);
+
+    // round_deadline should be set at initialization: timestamp(0) + round_duration(3600)
+    let info = client.get_group_info();
+    assert_eq!(info.round_deadline, 3600);
+}
+
+// ===========================================================================
+//  Exit Penalty Fix Tests (dynamic computation in approve_exit)
+// ===========================================================================
+
+/// Helper: 2-member ROSCA with 10% exit penalty, contribution = 100.
+fn setup_exit_penalty_env(
+    env: &Env,
+) -> (
+    AhjoorContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    soroban_sdk::token::Client<'_>,
+    Address,
+) {
+    env.mock_all_auths();
+    let contract_id = env.register(AhjoorContract, ());
+    let client = AhjoorContractClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let ta_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let ta_client = soroban_sdk::token::StellarAssetClient::new(env, &ta_addr);
+    let token_client = soroban_sdk::token::Client::new(env, &ta_addr);
+
+    let u1 = Address::generate(env);
+    let u2 = Address::generate(env);
+
+    for u in [&u1, &u2] {
+        ta_client.mint(u, &10_000);
+    }
+
+    let members = vec![env, u1.clone(), u2.clone()];
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &ta_addr,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 1000, // 10%
+            collective_goal: None,
+            member_goals: None,
+        },
+    );
+
+    (client, admin, u1, u2, token_client, ta_addr)
+}
+
+#[test]
+fn test_exit_before_payout_penalty_on_contributions_only() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, token_client, ta) = setup_exit_penalty_env(&env);
+
+    // u1 contributes round 0 but u2 does not, so no payout happens.
+    client.contribute(&u1, &ta, &100);
+
+    // Close the round (u1 contributed but u2 did not → no auto-payout, close manually)
+    env.ledger().set_timestamp(3601);
+    client.close_round();
+    // CurrentRound = 1. Contract holds u1's 100 tokens.
+
+    // u1 exits: contributed 1 round (100 tokens), no payout received, penalty = 100 * 10% = 10
+    // expected refund = 100 - 0 - 10 = 90
+    let balance_before = token_client.balance(&u1);
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    let balance_after = token_client.balance(&u1);
+    assert_eq!(balance_after - balance_before, 90);
+}
+
+#[test]
+fn test_exit_after_receiving_payout_deducted_from_refund() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, token_client, ta) = setup_exit_penalty_env(&env);
+
+    // Complete round 0: u1 and u2 both contribute. Recipient = u1 (index 0).
+    client.contribute(&u1, &ta, &100);
+    client.contribute(&u2, &ta, &100);
+    // u1 received 200 (the full pot). CurrentRound = 1.
+
+    // In round 1, u1 contributes again but u2 does not → round doesn't auto-complete.
+    client.contribute(&u1, &ta, &100);
+
+    env.ledger().set_timestamp(3601);
+    client.close_round();
+    // CurrentRound = 2. u1 has contributed 2 rounds, received 200.
+
+    // u1 exits:
+    //   contributed_total = 100 * 2 = 200
+    //   received_payout   = 200
+    //   penalty           = 200 * 10% = 20
+    //   net               = 200 - 200 - 20 = -20  → refund_amount = 0
+    let balance_before = token_client.balance(&u1);
+    client.request_emergency_exit(&u1);
+    client.approve_exit(&u1);
+
+    let balance_after = token_client.balance(&u1);
+    // No refund because u1 already received more than they put in after penalty
+    assert_eq!(balance_after, balance_before);
+}
+
+#[test]
+fn test_exit_zero_refund_when_payout_exceeds_contributions() {
+    let env = Env::default();
+    let (client, _admin, u1, u2, token_client, ta) = setup_exit_penalty_env(&env);
+
+    // Round 0: both contribute, u1 receives pot (200).
+    client.contribute(&u1, &ta, &100);
+    client.contribute(&u2, &ta, &100);
+    // CurrentRound = 1. u1 received 200 while contributing only 100.
+
+    // Request exit immediately (rounds_contributed = 1)
+    client.request_emergency_exit(&u1);
+
+    //   contributed_total = 100 * 1 = 100
+    //   received_payout   = 200
+    //   penalty           = 100 * 10% = 10
+    //   net               = 100 - 200 - 10 = -110 → refund_amount = 0
+    let balance_before = token_client.balance(&u1);
+    client.approve_exit(&u1);
+
+    let balance_after = token_client.balance(&u1);
+    assert_eq!(balance_after, balance_before, "zero refund when payout exceeds contributions");
 }

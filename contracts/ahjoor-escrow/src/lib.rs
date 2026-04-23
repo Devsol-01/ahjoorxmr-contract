@@ -9,6 +9,7 @@ const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
 const PERSISTENT_BUMP_AMOUNT: u32 = 120_000;
 const DEADLINE_EXTENSION_PROPOSAL_WINDOW: u64 = 24 * 60 * 60;
 const MAX_EVIDENCE_ENTRIES_PER_PARTY: u32 = 5;
+const DEFAULT_DISPUTE_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -39,14 +40,7 @@ pub struct Escrow {
     pub auto_renew: bool,
     pub renewal_count: u32,
     pub renewals_remaining: u32,
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EvidenceSubmission {
-    pub evidence_hash: BytesN<32>,
-    pub evidence_uri_hash: BytesN<32>,
-    pub submitted_at: u64,
+    pub dispute_timeout_seconds: Option<u64>,
 }
 
 #[contracttype]
@@ -65,6 +59,7 @@ pub struct Dispute {
     pub created_at: u64,
     pub resolved: bool,
     pub dispute_amount: i128,
+    pub timeout_seconds: Option<u64>,
 }
 
 #[contracttype]
@@ -115,6 +110,7 @@ pub enum DataKey {
     EscrowMetadata(u32),
     Evidence(u32, Address),
     RenewalAllowance(u32),
+    DefaultDisputeTimeout,
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 200; // 2%
@@ -136,6 +132,9 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::ContractVersion, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultDisputeTimeout, &DEFAULT_DISPUTE_TIMEOUT_SECONDS);
 
         env.storage()
             .instance()
@@ -230,6 +229,7 @@ impl AhjoorEscrowContract {
             } else {
                 renewal_count
             },
+            dispute_timeout_seconds: None,
         };
 
         env.storage()
@@ -266,6 +266,60 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        escrow_id
+    }
+
+    /// Create a new escrow with an explicit per-escrow dispute timeout override.
+    /// Uses renewal_count > 0 to enable auto_renew while staying within Soroban's
+    /// 10-parameter contract function limit.
+    pub fn create_escrow_w_timeout(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        amount: i128,
+        token: Address,
+        deadline: u64,
+        metadata_hash: Option<BytesN<32>>,
+        sellers: Vec<(Address, u32)>,
+        renewal_count: u32,
+        dispute_timeout_seconds: u64,
+    ) -> u32 {
+        if dispute_timeout_seconds == 0 {
+            panic!("dispute_timeout_seconds must be positive");
+        }
+
+        let auto_renew = renewal_count > 0;
+        let escrow_id = Self::create_escrow(
+            env.clone(),
+            buyer,
+            seller,
+            arbiter,
+            amount,
+            token,
+            deadline,
+            metadata_hash,
+            sellers,
+            auto_renew,
+            renewal_count,
+        );
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+        escrow.dispute_timeout_seconds = Some(dispute_timeout_seconds);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
 
         escrow_id
     }
@@ -484,89 +538,6 @@ impl AhjoorEscrowContract {
         env.storage().persistent().remove(&DataKey::RenewalAllowance(escrow_id));
     }
 
-    // --- Issue #141: Evidence Hash Anchoring ---
-
-    /// Submit evidence hash anchors for an escrow dispute workflow.
-    pub fn submit_evidence(
-        env: Env,
-        party: Address,
-        escrow_id: u32,
-        evidence_hash: BytesN<32>,
-        evidence_uri_hash: BytesN<32>,
-    ) {
-        Self::require_not_paused(&env);
-        party.require_auth();
-
-        let escrow: Escrow = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found");
-
-        if party != escrow.buyer && party != escrow.seller {
-            panic!("Only buyer or seller can submit evidence");
-        }
-
-        let key = DataKey::Evidence(escrow_id, party.clone());
-        let mut entries: Vec<EvidenceSubmission> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        if entries.len() >= MAX_EVIDENCE_ENTRIES_PER_PARTY {
-            panic!("Maximum evidence entries reached for this party");
-        }
-
-        entries.push_back(EvidenceSubmission {
-            evidence_hash: evidence_hash.clone(),
-            evidence_uri_hash,
-            submitted_at: env.ledger().timestamp(),
-        });
-
-        env.storage().persistent().set(&key, &entries);
-        env.storage().persistent().extend_ttl(
-            &key,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
-
-        events::emit_evidence_submitted(&env, escrow_id, party, evidence_hash);
-    }
-
-    /// Returns evidence submissions for buyer and seller in one call.
-    pub fn get_evidence(env: Env, escrow_id: u32) -> Vec<(Address, Vec<EvidenceSubmission>)> {
-        let escrow: Escrow = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Escrow(escrow_id))
-            .expect("Escrow not found");
-
-        let mut all: Vec<(Address, Vec<EvidenceSubmission>)> = Vec::new(&env);
-
-        let buyer_key = DataKey::Evidence(escrow_id, escrow.buyer.clone());
-        let buyer_entries: Vec<EvidenceSubmission> = env
-            .storage()
-            .persistent()
-            .get(&buyer_key)
-            .unwrap_or(Vec::new(&env));
-        if !buyer_entries.is_empty() {
-            all.push_back((escrow.buyer.clone(), buyer_entries));
-        }
-
-        let seller_key = DataKey::Evidence(escrow_id, escrow.seller.clone());
-        let seller_entries: Vec<EvidenceSubmission> = env
-            .storage()
-            .persistent()
-            .get(&seller_key)
-            .unwrap_or(Vec::new(&env));
-        if !seller_entries.is_empty() {
-            all.push_back((escrow.seller, seller_entries));
-        }
-
-        all
-    }
-
     /// Release part of the escrowed funds to seller. Can be called by buyer or arbiter.
     pub fn partial_release(env: Env, caller: Address, escrow_id: u32, release_amount: i128) {
         Self::require_not_paused(&env);
@@ -689,6 +660,7 @@ impl AhjoorEscrowContract {
             created_at: env.ledger().timestamp(),
             resolved: false,
             dispute_amount,
+            timeout_seconds: escrow.dispute_timeout_seconds,
         };
         env.storage()
             .persistent()
@@ -799,6 +771,67 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns true when an unresolved dispute has exceeded its timeout window.
+    /// Uses per-escrow dispute timeout when set, otherwise falls back to admin default.
+    pub fn check_escalation(env: Env, escrow_id: u32) -> bool {
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.status != EscrowStatus::Disputed && escrow.status != EscrowStatus::PartiallyDisputed {
+            return false;
+        }
+
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(escrow_id))
+            .expect("Dispute not found");
+
+        if dispute.resolved {
+            return false;
+        }
+
+        let default_timeout: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultDisputeTimeout)
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_SECONDS);
+        let effective_timeout = dispute.timeout_seconds.unwrap_or(default_timeout);
+
+        let elapsed = env.ledger().timestamp() - dispute.created_at;
+        if elapsed > effective_timeout {
+            events::emit_dispute_escalated(&env, escrow_id, effective_timeout);
+            return true;
+        }
+
+        false
+    }
+
+    /// Admin updates the default dispute escalation timeout (seconds).
+    pub fn update_default_dispute_timeout(env: Env, admin: Address, timeout_seconds: u64) {
+        Self::require_admin(&env, &admin);
+        if timeout_seconds == 0 {
+            panic!("Timeout must be positive");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultDisputeTimeout, &timeout_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_default_dispute_timeout(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultDisputeTimeout)
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_SECONDS)
     }
 
     /// Set protocol fee in basis points and fee recipient. Admin only.
@@ -1308,6 +1341,7 @@ impl AhjoorEscrowContract {
             auto_renew: false,
             renewal_count: 0,
             renewals_remaining: 0,
+            dispute_timeout_seconds: None,
         };
 
         env.storage()
@@ -1485,6 +1519,7 @@ impl AhjoorEscrowContract {
             auto_renew: false,
             renewal_count: 0,
             renewals_remaining: 0,
+            dispute_timeout_seconds: None,
         };
 
         env.storage()
@@ -1718,6 +1753,7 @@ impl AhjoorEscrowContract {
             auto_renew: source.auto_renew,
             renewal_count: source.renewal_count,
             renewals_remaining,
+            dispute_timeout_seconds: source.dispute_timeout_seconds,
         };
 
         env.storage()

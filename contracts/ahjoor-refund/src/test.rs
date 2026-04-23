@@ -51,8 +51,8 @@ fn setup<'a>() -> TestSetup<'a> {
     let token_admin_client = TokenAdminClient::new(&env, &token_addr);
 
     // Initialize both contracts — 86400 s (1 day) dispute window
-    payment_client.initialize(&admin);
-    refund_client.initialize(&admin, &payment_id, &86_400u64, &None, &0u32, &None);
+    payment_client.initialize(&admin, &admin, &0u32);
+    refund_client.initialize(&admin, &payment_id, &86_400u64, &None, &0u32, &None, &None);
 
     TestSetup {
         env,
@@ -75,7 +75,7 @@ fn create_completed_payment<'a>(
     s.token_admin_client.mint(customer, &(amount * 2));
     let pid =
         s.payment_client
-            .create_payment(customer, merchant, &amount, &s.token_addr, &None, &None);
+            .create_payment(customer, merchant, &amount, &s.token_addr, &None, &None, &None);
     s.payment_client.complete_payment(&pid);
     pid
 }
@@ -100,7 +100,7 @@ fn test_initialize() {
 fn test_initialize_twice_panics() {
     let s = setup();
     s.refund_client
-        .initialize(&s.admin, &s.payment_client.address, &86_400u64, &None, &0u32, &None);
+        .initialize(&s.admin, &s.payment_client.address, &86_400u64, &None, &0u32, &None, &None);
 }
 
 // ===========================================================================
@@ -144,7 +144,7 @@ fn test_request_refund_against_pending_payment_panics() {
     s.token_admin_client.mint(&customer, &500);
     let pid =
         s.payment_client
-            .create_payment(&customer, &merchant, &500, &s.token_addr, &None, &None);
+            .create_payment(&customer, &merchant, &500, &s.token_addr, &None, &None, &None);
     // Payment is still Pending — not Completed
 
     s.token_admin_client.mint(&customer, &100);
@@ -752,7 +752,7 @@ fn test_auth_required_for_admin_approve_refund() {
     let refund_id_addr = env.register(AhjoorRefundContract, ());
     let client = AhjoorRefundContractClient::new(&env, &refund_id_addr);
     let admin = Address::generate(&env);
-    client.initialize(&admin, &payment_id_addr, &86_400u64, &None, &0u32, &None);
+    client.initialize(&admin, &payment_id_addr, &86_400u64, &None, &0u32, &None, &None);
 
     let res = client.try_approve_refund(&admin, &0);
     assert!(res.is_err());
@@ -1244,8 +1244,8 @@ fn setup_with_dispute_window<'a>(dispute_window: u64) -> TestSetup<'a> {
     let token_client = TokenClient::new(&env, &token_addr);
     let token_admin_client = TokenAdminClient::new(&env, &token_addr);
 
-    payment_client.initialize(&admin);
-    refund_client.initialize(&admin, &payment_id, &dispute_window, &None, &0u32, &None);
+    payment_client.initialize(&admin, &admin, &0u32);
+    refund_client.initialize(&admin, &payment_id, &dispute_window, &None, &0u32, &None, &None);
 
     TestSetup {
         env,
@@ -1394,4 +1394,175 @@ fn test_auto_approve_emits_event() {
 
     let events = s.env.events().all();
     assert!(!events.is_empty());
+}
+
+#[test]
+fn test_refund_tiers_cap_amount_and_expire_after_all_windows() {
+    let s = setup();
+
+    let mut tiers = Vec::new(&s.env);
+    tiers.push_back((86_400u64, 10_000u32));
+    tiers.push_back((604_800u64, 5_000u32));
+    s.refund_client.set_refund_tiers(&s.admin, &tiers);
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    s.env.ledger().set_timestamp(100);
+    let pid_a = create_completed_payment(&s, &customer, &merchant, 200);
+
+    let rid_a = s.refund_client.request_refund(
+        &customer,
+        &pid_a,
+        &300,
+        &String::from_str(&s.env, "tier-a"),
+    );
+    let refund_a = s.refund_client.get_refund(&rid_a);
+    assert_eq!(refund_a.amount, 200);
+
+    s.env.ledger().set_timestamp(200);
+    let pid_b = create_completed_payment(&s, &customer, &merchant, 200);
+    s.env.ledger().set_timestamp(200 + 2 * 86_400);
+    let rid_b = s.refund_client.request_refund(
+        &customer,
+        &pid_b,
+        &180,
+        &String::from_str(&s.env, "tier-b"),
+    );
+    let refund_b = s.refund_client.get_refund(&rid_b);
+    assert_eq!(refund_b.amount, 100);
+
+    s.env.ledger().set_timestamp(300);
+    let pid_c = create_completed_payment(&s, &customer, &merchant, 200);
+    s.env.ledger().set_timestamp(300 + 604_800 + 1);
+    let expired = s.refund_client.try_request_refund(
+        &customer,
+        &pid_c,
+        &50,
+        &String::from_str(&s.env, "expired"),
+    );
+    assert!(expired.is_err());
+}
+
+#[test]
+fn test_merchant_refund_immediate_transfer_and_balance_deduction() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&merchant, &300);
+
+    let customer_before = s.token_client.balance(&customer);
+    let merchant_before = s.token_client.balance(&merchant);
+
+    let rid = s
+        .refund_client
+        .merchant_refund(&merchant, &pid, &120, &42u32);
+
+    let refund = s.refund_client.get_refund(&rid);
+    assert_eq!(refund.status, RefundStatus::Processed);
+    assert_eq!(s.token_client.balance(&customer), customer_before + 120);
+    assert_eq!(s.token_client.balance(&merchant), merchant_before - 120);
+}
+
+#[test]
+fn test_merchant_refund_rejects_non_payment_merchant() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    let attacker = Address::generate(&s.env);
+
+    let pid = create_completed_payment(&s, &customer, &merchant, 500);
+    s.token_admin_client.mint(&attacker, &500);
+
+    let res = s
+        .refund_client
+        .try_merchant_refund(&attacker, &pid, &100, &7u32);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_bulk_process_refunds_success_and_stats_update() {
+    let s = setup();
+    let customer_a = Address::generate(&s.env);
+    let customer_b = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid_a = create_completed_payment(&s, &customer_a, &merchant, 200);
+    let pid_b = create_completed_payment(&s, &customer_b, &merchant, 300);
+
+    let rid_a = s.refund_client.request_refund(
+        &customer_a,
+        &pid_a,
+        &100,
+        &String::from_str(&s.env, "bulk-a"),
+    );
+    let rid_b = s.refund_client.request_refund(
+        &customer_b,
+        &pid_b,
+        &150,
+        &String::from_str(&s.env, "bulk-b"),
+    );
+
+    s.refund_client.approve_refund(&s.admin, &rid_a);
+    s.refund_client.approve_refund(&s.admin, &rid_b);
+
+    let mut ids = Vec::new(&s.env);
+    ids.push_back(rid_a);
+    ids.push_back(rid_b);
+    s.refund_client.bulk_process_refunds(&s.admin, &ids);
+
+    assert_eq!(s.refund_client.get_refund(&rid_a).status, RefundStatus::Processed);
+    assert_eq!(s.refund_client.get_refund(&rid_b).status, RefundStatus::Processed);
+
+    let stats = s.refund_client.get_global_refund_stats();
+    assert!(stats.total_processed >= 2);
+}
+
+#[test]
+fn test_bulk_process_refunds_mixed_status_fails_atomically() {
+    let s = setup();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+
+    let pid_a = create_completed_payment(&s, &customer, &merchant, 200);
+    let pid_b = create_completed_payment(&s, &customer, &merchant, 200);
+
+    let rid_a = s.refund_client.request_refund(
+        &customer,
+        &pid_a,
+        &50,
+        &String::from_str(&s.env, "mix-a"),
+    );
+    let rid_b = s.refund_client.request_refund(
+        &customer,
+        &pid_b,
+        &60,
+        &String::from_str(&s.env, "mix-b"),
+    );
+
+    s.refund_client.approve_refund(&s.admin, &rid_a);
+
+    let mut ids = Vec::new(&s.env);
+    ids.push_back(rid_a);
+    ids.push_back(rid_b);
+
+    let res = s.refund_client.try_bulk_process_refunds(&s.admin, &ids);
+    assert!(res.is_err());
+    assert_eq!(s.refund_client.get_refund(&rid_a).status, RefundStatus::Approved);
+    assert_eq!(s.refund_client.get_refund(&rid_b).status, RefundStatus::Requested);
+}
+
+#[test]
+fn test_bulk_process_refunds_oversized_batch_rejected() {
+    let s = setup();
+
+    let mut ids = Vec::new(&s.env);
+    for i in 0..21u32 {
+        ids.push_back(i);
+    }
+
+    let res = s.refund_client.try_bulk_process_refunds(&s.admin, &ids);
+    assert!(res.is_err());
 }

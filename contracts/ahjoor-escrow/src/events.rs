@@ -58,6 +58,14 @@ pub struct DisputeResolved {
     pub resolved_by: Address,
 }
 
+/// Event: Dispute escalation threshold reached
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DisputeEscalated {
+    pub escrow_id: u32,
+    pub timeout_seconds: u64,
+}
+
 /// Event: Protocol fee paid on dispute resolution
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -255,6 +263,14 @@ pub fn emit_dispute_resolved(
     .publish(e);
 }
 
+pub fn emit_dispute_escalated(e: &Env, escrow_id: u32, timeout_seconds: u64) {
+    DisputeEscalated {
+        escrow_id,
+        timeout_seconds,
+    }
+    .publish(e);
+}
+
 pub fn emit_protocol_fee_paid(e: &Env, escrow_id: u32, fee_amount: i128, fee_recipient: Address) {
     EscrowProtocolFeePaid {
         escrow_id,
@@ -383,18 +399,12 @@ pub fn emit_arbiter_assigned(e: &Env, escrow_id: u32, arbiter: Address) {
     ArbiterAssigned { escrow_id, arbiter }.publish(e);
 }
 
-// --- Issue #141: Evidence Hash Anchoring ---
-
-/// Event: Evidence hash submitted for a dispute
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct EvidenceSubmitted {
-    pub escrow_id: u32,
-    pub party: Address,
-    pub evidence_hash: BytesN<32>,
-}
-
-pub fn emit_evidence_submitted(e: &Env, escrow_id: u32, party: Address, evidence_hash: BytesN<32>) {
+pub fn emit_evidence_submitted(
+    e: &Env,
+    escrow_id: u32,
+    party: Address,
+    evidence_hash: BytesN<32>,
+) {
     EvidenceSubmitted {
         escrow_id,
         party,

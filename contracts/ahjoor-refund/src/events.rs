@@ -102,6 +102,42 @@ pub struct RefundFeeCollected {
     pub fee_amount: i128,
 }
 
+/// Event: Partial refund cap threshold reached
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialRefundCapApplied {
+    pub refund_id: u32,
+    pub remaining_refundable: i128,
+}
+
+/// Event: Tier applied to a refund request
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundTierApplied {
+    pub refund_id: u32,
+    pub tier_bps: u32,
+    pub max_refundable: i128,
+}
+
+/// Event: Merchant initiated immediate refund
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantInitiatedRefund {
+    pub refund_id: u32,
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub amount: i128,
+    pub reason_code: u32,
+}
+
+/// Event: Bulk approved refunds processed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BulkRefundProcessed {
+    pub count: u32,
+    pub total_amount: i128,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_refund_requested(
@@ -232,4 +268,40 @@ pub fn emit_refund_fee_collected(e: &Env, refund_id: u32, fee_amount: i128) {
         fee_amount,
     }
     .publish(e);
+}
+
+pub fn emit_refund_tier_applied(
+    e: &Env,
+    refund_id: u32,
+    tier_bps: u32,
+    max_refundable: i128,
+) {
+    RefundTierApplied {
+        refund_id,
+        tier_bps,
+        max_refundable,
+    }
+    .publish(e);
+}
+
+pub fn emit_merchant_initiated_refund(
+    e: &Env,
+    refund_id: u32,
+    payment_id: u32,
+    merchant: Address,
+    amount: i128,
+    reason_code: u32,
+) {
+    MerchantInitiatedRefund {
+        refund_id,
+        payment_id,
+        merchant,
+        amount,
+        reason_code,
+    }
+    .publish(e);
+}
+
+pub fn emit_bulk_refund_processed(e: &Env, count: u32, total_amount: i128) {
+    BulkRefundProcessed { count, total_amount }.publish(e);
 }

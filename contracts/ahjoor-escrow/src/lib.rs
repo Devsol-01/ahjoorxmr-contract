@@ -1038,6 +1038,53 @@ impl AhjoorEscrowContract {
             .expect("Escrow not found")
     }
 
+    /// Transfer buyer role in an active escrow to a new address.
+    pub fn transfer_buyer_role(
+        env: Env,
+        current_buyer: Address,
+        escrow_id: u32,
+        new_buyer: Address,
+    ) {
+        Self::require_not_paused(&env);
+        current_buyer.require_auth();
+
+        if current_buyer == new_buyer {
+            panic!("New buyer must be different from current buyer");
+        }
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.status != EscrowStatus::Active {
+            panic!("Buyer transfer only allowed for active escrows");
+        }
+
+        if escrow.buyer != current_buyer {
+            panic!("Only current buyer can transfer buyer role");
+        }
+
+        let old_buyer = escrow.buyer.clone();
+        escrow.buyer = new_buyer.clone();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_buyer_role_transferred(&env, escrow_id, old_buyer, new_buyer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Update metadata hash for an escrow. Requires auth from buyer or seller.
     pub fn update_metadata(
         env: Env,
@@ -1398,7 +1445,7 @@ impl AhjoorEscrowContract {
     /// Active escrows with this arbiter are flagged via ArbiterNeedsReplacement.
     pub fn remove_arbiter(env: Env, admin: Address, arbiter: Address, escrow_ids: Vec<u32>) {
         Self::require_admin(&env, &admin);
-        let mut pool: Vec<Address> = env
+        let pool: Vec<Address> = env
             .storage()
             .instance()
             .get(&DataKey::ArbiterPool)

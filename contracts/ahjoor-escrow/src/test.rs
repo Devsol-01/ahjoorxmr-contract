@@ -2240,3 +2240,140 @@ fn test_auto_renew_fails_with_insufficient_allowance() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_transfer_buyer_role_requires_current_buyer_authorization() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    let outsider = Address::generate(&s.env);
+    let new_buyer = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &deadline,
+        &None,
+        &Vec::new(&s.env),
+        &false,
+        &0u32,
+    );
+
+    let result = s
+        .client
+        .try_transfer_buyer_role(&outsider, &escrow_id, &new_buyer);
+    assert!(result.is_err());
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.buyer, buyer);
+}
+
+#[test]
+fn test_transfer_buyer_role_rejected_during_dispute() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    let new_buyer = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &deadline,
+        &None,
+        &Vec::new(&s.env),
+        &false,
+        &0u32,
+    );
+
+    s.client.dispute_escrow(
+        &buyer,
+        &escrow_id,
+        &String::from_str(&s.env, "dispute"),
+        &250,
+    );
+
+    let result = s
+        .client
+        .try_transfer_buyer_role(&buyer, &escrow_id, &new_buyer);
+    assert!(result.is_err());
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.buyer, buyer);
+}
+
+#[test]
+fn test_transfer_buyer_role_new_buyer_inherits_rights_old_buyer_loses_them() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    let new_buyer = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer,
+        &seller,
+        &arbiter,
+        &250,
+        &s.token_addr,
+        &deadline,
+        &None,
+        &Vec::new(&s.env),
+        &false,
+        &0u32,
+    );
+
+    s.client
+        .transfer_buyer_role(&buyer, &escrow_id, &new_buyer);
+
+    let transfer_event = s
+        .env
+        .events()
+        .all()
+        .last()
+        .expect("Expected buyer role transfer event");
+    let data: soroban_sdk::Map<Symbol, soroban_sdk::Val> = transfer_event.2.into_val(&s.env);
+    let event_escrow_id: u32 = data
+        .get(Symbol::new(&s.env, "escrow_id"))
+        .unwrap()
+        .into_val(&s.env);
+    let event_old_buyer: Address = data
+        .get(Symbol::new(&s.env, "old_buyer"))
+        .unwrap()
+        .into_val(&s.env);
+    let event_new_buyer: Address = data
+        .get(Symbol::new(&s.env, "new_buyer"))
+        .unwrap()
+        .into_val(&s.env);
+
+    assert_eq!(event_escrow_id, escrow_id);
+    assert_eq!(event_old_buyer, buyer);
+    assert_eq!(event_new_buyer, new_buyer);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.buyer, new_buyer);
+
+    let old_buyer_release = s.client.try_release_escrow(&buyer, &escrow_id);
+    assert!(old_buyer_release.is_err());
+
+    s.client.release_escrow(&new_buyer, &escrow_id);
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+
+}
+

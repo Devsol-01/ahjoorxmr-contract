@@ -1,5 +1,45 @@
 use soroban_sdk::{contractevent, Address, Env, String};
 
+/// Event: Partial refund cap applied (remaining refundable < 10%)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialRefundCapApplied {
+    pub refund_id: u32,
+    pub remaining_refundable: i128,
+}
+
+/// Event: Refund reason code recorded (#157)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundReasonRecorded {
+    pub refund_id: u32,
+    pub reason_code: u32,
+}
+
+/// Event: Refund auto-rejected after idle window (#158)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAutoRejected {
+    pub refund_id: u32,
+    pub elapsed_seconds: u64,
+}
+
+/// Event: Customer appealed a rejected refund (#159)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAppealed {
+    pub refund_id: u32,
+    pub customer: Address,
+}
+
+/// Event: Admin resolved a refund appeal (#159)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AppealResolved {
+    pub refund_id: u32,
+    pub approved: bool,
+}
+
 /// Event: Refund requested
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -270,6 +310,18 @@ pub fn emit_refund_fee_collected(e: &Env, refund_id: u32, fee_amount: i128) {
     .publish(e);
 }
 
+pub fn emit_refund_reason_recorded(e: &Env, refund_id: u32, reason_code: u32) {
+    RefundReasonRecorded {
+        refund_id,
+        reason_code,
+    }
+    .publish(e);
+}
+
+pub fn emit_refund_auto_rejected(e: &Env, refund_id: u32, elapsed_seconds: u64) {
+    RefundAutoRejected {
+        refund_id,
+        elapsed_seconds,
 pub fn emit_refund_tier_applied(
     e: &Env,
     refund_id: u32,
@@ -302,6 +354,12 @@ pub fn emit_merchant_initiated_refund(
     .publish(e);
 }
 
+pub fn emit_appeal_resolved(e: &Env, refund_id: u32, approved: bool) {
+    AppealResolved {
+        refund_id,
+        approved,
+    }
+    .publish(e);
 pub fn emit_bulk_refund_processed(e: &Env, count: u32, total_amount: i128) {
     BulkRefundProcessed { count, total_amount }.publish(e);
 }

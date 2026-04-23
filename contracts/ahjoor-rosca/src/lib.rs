@@ -54,6 +54,15 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::InvalidMaxDefaults);
         }
 
+        // Validate max_members: 1 <= max_members <= 100
+        let max_members = config.max_members.unwrap_or(50);
+        if max_members < 1 || max_members > 100 {
+            panic_with_error!(&env, Error::InvalidMaxMembers);
+        }
+        if (members.len() as u32) > max_members {
+            panic_with_error!(&env, Error::GroupFull);
+        }
+
         let approved_tokens: Vec<Address> = env
             .storage()
             .instance()
@@ -202,6 +211,26 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::MaxDefaults, &config.max_defaults);
         events::emit_suspension_threshold_set(&env, config.max_defaults);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxMembers, &max_members);
+
+        // Timestamp-based Payout Scheduling
+        env.storage()
+            .instance()
+            .set(&DataKey::UseTimestampSchedule, &config.use_timestamp_schedule);
+        env.storage()
+            .instance()
+            .set(&DataKey::RoundDurationSeconds, &config.round_duration_seconds);
+
+        if config.use_timestamp_schedule {
+            let timestamp_deadline = env.ledger().timestamp() + config.round_duration_seconds;
+            env.storage()
+                .instance()
+                .set(&DataKey::RoundDeadlineTimestamp, &timestamp_deadline);
+            events::emit_round_deadline_timestamp_set(&env, 0, timestamp_deadline);
+        }
 
         // Savings Goal Initialization
         if let Some(goal) = config.collective_goal {
@@ -396,11 +425,24 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::AmountMustBePositive);
         }
 
-        let deadline: u64 = env
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .expect("Deadline not set");
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .expect("Timestamp deadline not set")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .expect("Deadline not set")
+        };
+
         if env.ledger().timestamp() > deadline {
             panic_with_error!(&env, Error::ContributionWindowClosed);
         }
@@ -632,11 +674,23 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
 
-        let deadline: u64 = env
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .unwrap();
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .expect("Timestamp deadline not set")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap()
+        };
         if env.ledger().timestamp() <= deadline {
             panic_with_error!(&env, Error::DeadlineNotPassed);
         }
@@ -687,11 +741,23 @@ impl AhjoorContract {
             .expect("Admin not set");
         admin.require_auth();
 
-        let deadline: u64 = env
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .unwrap();
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .expect("Timestamp deadline not set")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap()
+        };
         if env.ledger().timestamp() <= deadline {
             panic_with_error!(&env, Error::DeadlineNotPassed);
         }
@@ -882,6 +948,17 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::Members)
             .expect("Not initialized");
+
+        let max_members: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxMembers)
+            .unwrap_or(50);
+
+        if (members.len() as u32) >= max_members {
+            panic_with_error!(&env, Error::GroupFull);
+        }
+
         if members.contains(&new_member) {
             panic_with_error!(&env, Error::AlreadyAMember);
         }
@@ -1446,6 +1523,9 @@ impl AhjoorContract {
             ProposalType::MemberRemoval => {
                 internals::execute_member_removal(&env, &proposal.target_member);
             }
+            ProposalType::MaxMembersUpdate => {
+                internals::execute_max_members_update(&env, proposal.execution_data);
+            }
         }
 
         proposal.status = ProposalStatus::Executed;
@@ -1497,11 +1577,24 @@ impl AhjoorContract {
                 .get(&DataKey::PaidMembers)
                 .unwrap_or(Vec::new(&env)),
             next_recipient,
-            round_deadline: env
-                .storage()
-                .instance()
-                .get(&DataKey::RoundDeadline)
-                .unwrap_or(0),
+            round_deadline: {
+                let use_timestamp: bool = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::UseTimestampSchedule)
+                    .unwrap_or(false);
+                if use_timestamp {
+                    env.storage()
+                        .instance()
+                        .get(&DataKey::RoundDeadlineTimestamp)
+                        .unwrap_or(0)
+                } else {
+                    env.storage()
+                        .instance()
+                        .get(&DataKey::RoundDeadline)
+                        .unwrap_or(0)
+                }
+            },
         }
     }
 
@@ -1605,11 +1698,25 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::PaidMembers)
             .unwrap_or(Vec::new(&env));
-        let deadline: u64 = env
+
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .unwrap_or(0);
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .unwrap_or(0)
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap_or(0)
+        };
+
         let strategy: PayoutStrategy = env
             .storage()
             .instance()
@@ -1627,11 +1734,23 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap_or(0);
-        let deadline: u64 = env
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .unwrap_or(0);
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .unwrap_or(0)
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap_or(0)
+        };
         let members: Vec<Address> = env
             .storage()
             .instance()
@@ -1677,16 +1796,35 @@ impl AhjoorContract {
             .instance()
             .get(&DataKey::CurrentRound)
             .unwrap_or(0);
-        let current_deadline: u64 = env
+        let use_timestamp: bool = env
             .storage()
             .instance()
-            .get(&DataKey::RoundDeadline)
-            .unwrap_or(0);
-        let round_duration: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RoundDuration)
-            .unwrap_or(0);
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let current_deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .unwrap_or(0)
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .unwrap_or(0)
+        };
+
+        let round_duration: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDurationSeconds)
+                .unwrap_or(0)
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDuration)
+                .unwrap_or(0)
+        };
 
         let mut deadlines = Map::new(&env);
         for i in 0..count {
@@ -1699,6 +1837,13 @@ impl AhjoorContract {
             deadlines.set(round, deadline);
         }
         deadlines
+    }
+
+    pub fn get_next_deadline_timestamp(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RoundDeadlineTimestamp)
+            .unwrap_or(0)
     }
 
     pub fn get_savings_progress(env: Env, member: Option<Address>) -> (i128, i128, i128, i128) {
@@ -1845,6 +1990,52 @@ impl AhjoorContract {
             .unwrap_or(3)
     }
 
+    /// Update the maximum member limit. Admin-only.
+    /// Cannot decrease below current member count.
+    /// new_max must be between 1 and 100.
+    pub fn update_max_members(env: Env, new_max: u32) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        admin.require_auth();
+
+        if new_max < 1 || new_max > 100 {
+            panic_with_error!(&env, Error::InvalidMaxMembers);
+        }
+
+        let current_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(&env));
+
+        if new_max < current_members.len() as u32 {
+            panic_with_error!(&env, Error::InvalidMaxMembers);
+        }
+
+        let old_max: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxMembers)
+            .unwrap_or(50);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxMembers, &new_max);
+
+        events::emit_max_members_upd(&env, old_max, new_max);
+    }
+
+    /// Get the current maximum member limit.
+    pub fn get_max_members(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxMembers)
+            .unwrap_or(50)
+    }
+
     // --- EMERGENCY EXIT ---
 
     pub fn pause_group(env: Env, reason: soroban_sdk::String) {
@@ -1900,6 +2091,26 @@ impl AhjoorContract {
                 &DataKey::RoundDeadline,
                 &(current_deadline + pause_duration),
             );
+        }
+
+        // Extend the timestamp-based deadline if enabled
+        let current_timestamp_deadline: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDeadlineTimestamp)
+            .unwrap_or(0);
+        if current_timestamp_deadline > 0 {
+            let next_deadline = current_timestamp_deadline + pause_duration;
+            env.storage().instance().set(
+                &DataKey::RoundDeadlineTimestamp,
+                &next_deadline,
+            );
+            let current_round: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::CurrentRound)
+                .unwrap_or(0);
+            events::emit_round_deadline_timestamp_set(&env, current_round, next_deadline);
         }
 
         env.storage().instance().set(&DataKey::Paused, &false);

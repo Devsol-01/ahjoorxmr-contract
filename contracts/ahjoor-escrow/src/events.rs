@@ -188,6 +188,15 @@ pub struct EscrowAutoRenewed {
     pub renewals_remaining: u32,
 }
 
+/// Event: Buyer role transferred to another address
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BuyerRoleTransferred {
+    pub escrow_id: u32,
+    pub old_buyer: Address,
+    pub new_buyer: Address,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_escrow_created(
@@ -441,6 +450,20 @@ pub fn emit_escrow_auto_renewed(
         old_escrow_id,
         new_escrow_id,
         renewals_remaining,
+    }
+    .publish(e);
+}
+
+pub fn emit_buyer_role_transferred(
+    e: &Env,
+    escrow_id: u32,
+    old_buyer: Address,
+    new_buyer: Address,
+) {
+    BuyerRoleTransferred {
+        escrow_id,
+        old_buyer,
+        new_buyer,
     }
     .publish(e);
 }

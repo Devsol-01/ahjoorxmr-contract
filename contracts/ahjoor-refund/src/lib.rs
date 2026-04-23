@@ -54,6 +54,7 @@ pub enum RefundStatus {
     Approved = 1,
     Rejected = 2,
     Processed = 3,
+    UnderAppeal = 4,
 }
 
 #[contracttype]
@@ -67,9 +68,11 @@ pub struct Refund {
     pub token: Address,
     pub status: RefundStatus,
     pub reason: String,
+    pub reason_code: u32,
     pub requested_at: u64,
     pub approved_at: Option<u64>,
     pub processed_at: Option<u64>,
+    pub rejected_at: Option<u64>,
     pub auto_approved_source: Option<String>, // "whitelist" or "dispute_window"
     pub escrow_id: Option<u32>,                // For cross-contract escrow refunds
     pub fee_amount: Option<i128>,              // Fee deducted on processing
@@ -119,6 +122,18 @@ pub enum DataKey {
     RefundFeeBps,
     /// Fee recipient address (Issue #160)
     FeeRecipient,
+    /// Index: (merchant, reason_code) → Vec<u32> of refund IDs (#157)
+    ReasonCodeRefunds(Address, u32),
+    /// Count of refunds per (merchant, reason_code) (#157)
+    ReasonCodeCount(Address, u32),
+    /// Global auto-reject window in seconds (#158)
+    AutoRejectWindow,
+    /// Per-refund deadline extension in seconds (#158)
+    RefundDeadlineExtension(u32),
+    /// Appeal window in seconds after rejection (#159)
+    AppealWindow,
+    /// Ordered queue of pending (Requested) refund IDs (#164)
+    PendingRefundQueue,
 }
 
 mod events;
@@ -129,7 +144,8 @@ pub struct AhjoorRefundContract;
 #[contractimpl]
 impl AhjoorRefundContract {
     /// Initialize the refund contract with an admin, the payment contract address, a
-    /// `dispute_window` (in seconds), optional escrow contract address, and refund fee parameters.
+    /// `dispute_window` (in seconds), optional escrow contract address, refund fee parameters,
+    /// auto-reject window, and appeal window.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -138,6 +154,8 @@ impl AhjoorRefundContract {
         escrow_contract: Option<Address>,
         refund_fee_bps: u32,
         fee_recipient: Option<Address>,
+        auto_reject_window_seconds: u64,
+        appeal_window_seconds: u64,
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("Already initialized");
@@ -195,6 +213,27 @@ impl AhjoorRefundContract {
             .persistent()
             .set(&DataKey::AutoApprovedMerchants, &empty_whitelist);
 
+        // Issue #158: Store auto-reject window (default 30 days = 2_592_000s)
+        let effective_auto_reject = if auto_reject_window_seconds == 0 {
+            2_592_000u64
+        } else {
+            auto_reject_window_seconds
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::AutoRejectWindow, &effective_auto_reject);
+
+        // Issue #159: Store appeal window
+        env.storage()
+            .instance()
+            .set(&DataKey::AppealWindow, &appeal_window_seconds);
+
+        // Issue #164: Initialize empty pending refund queue
+        let empty_queue: Vec<u32> = Vec::new(&env);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingRefundQueue, &empty_queue);
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -204,6 +243,7 @@ impl AhjoorRefundContract {
     /// Cross-contract validates: payment exists, status is Completed, merchant matches,
     /// and refund amount does not exceed the original payment amount (#64).
     /// If merchant is whitelisted, auto-approves immediately (Issue #163).
+    /// `reason_code`: 0=Defective, 1=NotDelivered, 2=DuplicateCharge, 3=Unauthorized, 4=Other (#157).
     /// Returns the refund ID.
     pub fn request_refund(
         env: Env,
@@ -211,12 +251,18 @@ impl AhjoorRefundContract {
         payment_id: u32,
         amount: i128,
         reason: String,
+        reason_code: u32,
     ) -> u32 {
         Self::require_not_paused(&env);
         customer.require_auth();
 
         if amount <= 0 {
             panic!("Refund amount must be positive");
+        }
+
+        // #157: Validate reason code (0-4)
+        if reason_code > 4 {
+            panic!("Invalid reason code: must be 0-4");
         }
 
         // --- Cross-contract validation (#64) ---
@@ -279,9 +325,11 @@ impl AhjoorRefundContract {
             token: token.clone(),
             status: initial_status,
             reason,
+            reason_code,
             requested_at: now,
             approved_at: if is_whitelisted { Some(now) } else { None },
             processed_at: None,
+            rejected_at: None,
             auto_approved_source: if is_whitelisted {
                 Some(String::from_str(&env, "whitelist"))
             } else {
@@ -304,9 +352,36 @@ impl AhjoorRefundContract {
         Self::append_index(&env, &DataKey::MerchantRefunds(merchant.clone()), refund_id);
         Self::append_index(&env, &DataKey::PaymentRefunds(payment_id), refund_id);
 
+        // #157: Update reason code index and count
+        Self::append_index(
+            &env,
+            &DataKey::ReasonCodeRefunds(merchant.clone(), reason_code),
+            refund_id,
+        );
+        let count_key = DataKey::ReasonCodeCount(merchant.clone(), reason_code);
+        let prev_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&count_key, &(prev_count + 1));
+        env.storage().persistent().extend_ttl(
+            &count_key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // #164: Add to pending queue only when not auto-approved
+        if !is_whitelisted {
+            Self::append_to_pending_queue(&env, refund_id);
+        }
+
         Self::update_stats_on_request(&env, &merchant, amount);
 
         events::emit_refund_requested(&env, refund_id, customer, amount, token, refund.reason);
+        events::emit_refund_reason_recorded(&env, refund_id, reason_code);
 
         if is_whitelisted {
             events::emit_refund_auto_approved_whitelist(&env, refund_id, merchant, amount);
@@ -356,6 +431,9 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // #164: Remove from pending queue
+        Self::remove_from_pending_queue(&env, refund_id);
+
         Self::update_stats_on_approve(&env, &refund.merchant);
 
         events::emit_refund_approved(&env, refund_id, admin, refund.approved_at.unwrap());
@@ -390,7 +468,9 @@ impl AhjoorRefundContract {
             panic!("Refund is not in requested status");
         }
 
+        let now = env.ledger().timestamp();
         refund.status = RefundStatus::Rejected;
+        refund.rejected_at = Some(now);
 
         env.storage()
             .persistent()
@@ -401,15 +481,12 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // #164: Remove from pending queue
+        Self::remove_from_pending_queue(&env, refund_id);
+
         Self::update_stats_on_reject(&env, &refund.merchant);
 
-        events::emit_refund_rejected(
-            &env,
-            refund_id,
-            admin,
-            rejection_reason,
-            env.ledger().timestamp(),
-        );
+        events::emit_refund_rejected(&env, refund_id, admin, rejection_reason, now);
 
         env.storage()
             .instance()
@@ -710,6 +787,379 @@ impl AhjoorRefundContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    // -------------------------------------------------------------------------
+    // #157: Structured Refund Reason Codes
+    // -------------------------------------------------------------------------
+
+    /// Get refund IDs for a merchant filtered by reason code, with pagination.
+    /// reason_code: 0=Defective, 1=NotDelivered, 2=DuplicateCharge, 3=Unauthorized, 4=Other
+    pub fn get_refunds_by_reason(
+        env: Env,
+        merchant: Address,
+        reason_code: u32,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u32> {
+        if reason_code > 4 {
+            panic!("Invalid reason code: must be 0-4");
+        }
+        let key = DataKey::ReasonCodeRefunds(merchant, reason_code);
+        let all: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        let total = all.len();
+        let start = (page * page_size).min(total);
+        let end = (start + page_size).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(all.get(i).unwrap());
+        }
+        result
+    }
+
+    /// Get the count of refunds for a merchant + reason_code combination.
+    pub fn get_reason_code_count(env: Env, merchant: Address, reason_code: u32) -> u32 {
+        if reason_code > 4 {
+            panic!("Invalid reason code: must be 0-4");
+        }
+        env.storage()
+            .persistent()
+            .get(&DataKey::ReasonCodeCount(merchant, reason_code))
+            .unwrap_or(0)
+    }
+
+    // -------------------------------------------------------------------------
+    // #158: Auto-Reject Stale Refund Requests
+    // -------------------------------------------------------------------------
+
+    /// Auto-reject a refund that has been sitting in Requested status beyond the idle window.
+    /// Callable by anyone. Returns escrowed funds to customer.
+    pub fn auto_reject_stale_refund(env: Env, refund_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::Requested {
+            panic!("Refund is not in requested status");
+        }
+
+        let auto_reject_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AutoRejectWindow)
+            .expect("Auto-reject window not configured");
+
+        let extension: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RefundDeadlineExtension(refund_id))
+            .unwrap_or(0);
+
+        let deadline = refund.requested_at + auto_reject_window + extension;
+        let now = env.ledger().timestamp();
+
+        if now < deadline {
+            panic!("Auto-reject window has not elapsed");
+        }
+
+        let elapsed_seconds = now - refund.requested_at;
+
+        // Return escrowed funds to customer
+        let client = token::Client::new(&env, &refund.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &refund.customer,
+            &refund.amount,
+        );
+
+        refund.status = RefundStatus::Rejected;
+        refund.rejected_at = Some(now);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // #164: Remove from pending queue
+        Self::remove_from_pending_queue(&env, refund_id);
+
+        Self::update_stats_on_reject(&env, &refund.merchant);
+
+        events::emit_refund_auto_rejected(&env, refund_id, elapsed_seconds);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the auto-reject deadline for a specific refund. Admin only.
+    pub fn extend_refund_deadline(
+        env: Env,
+        admin: Address,
+        refund_id: u32,
+        extra_seconds: u64,
+    ) {
+        Self::require_admin(&env, &admin);
+
+        let refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::Requested {
+            panic!("Refund is not in requested status");
+        }
+
+        let key = DataKey::RefundDeadlineExtension(refund_id);
+        let current_extension: u64 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(0);
+
+        env.storage()
+            .persistent()
+            .set(&key, &(current_extension + extra_seconds));
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the configured auto-reject window in seconds.
+    pub fn get_auto_reject_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AutoRejectWindow)
+            .expect("Auto-reject window not configured")
+    }
+
+    // -------------------------------------------------------------------------
+    // #159: Customer Refund Appeal After Merchant Rejection
+    // -------------------------------------------------------------------------
+
+    /// Appeal a rejected refund. Only the original customer can call this,
+    /// within the configured appeal window after rejection.
+    pub fn appeal_refund(env: Env, customer: Address, refund_id: u32) {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::Rejected {
+            panic!("Appeal only allowed from Rejected status");
+        }
+
+        if refund.customer != customer {
+            panic!("Only the original customer can appeal");
+        }
+
+        let appeal_window: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AppealWindow)
+            .expect("Appeal window not configured");
+
+        let rejected_at = refund.rejected_at.expect("Rejection timestamp missing");
+        let now = env.ledger().timestamp();
+
+        if now > rejected_at + appeal_window {
+            panic!("Appeal window has expired");
+        }
+
+        refund.status = RefundStatus::UnderAppeal;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_refund_appealed(&env, refund_id, customer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Resolve a refund appeal. Admin only.
+    /// If approved: transfers funds to customer (processed).
+    /// If rejected: final rejection, funds returned to customer, no further appeal.
+    pub fn resolve_appeal(env: Env, admin: Address, refund_id: u32, approve: bool) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::UnderAppeal {
+            panic!("Refund is not under appeal");
+        }
+
+        let now = env.ledger().timestamp();
+        let client = token::Client::new(&env, &refund.token);
+
+        if approve {
+            let fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::RefundFeeBps)
+                .unwrap_or(0);
+
+            let fee_amount = if fee_bps > 0 {
+                (refund.amount as u128 * fee_bps as u128 / 10_000) as i128
+            } else {
+                0
+            };
+
+            let customer_amount = refund.amount - fee_amount;
+
+            if customer_amount > 0 {
+                client.transfer(
+                    &env.current_contract_address(),
+                    &refund.customer,
+                    &customer_amount,
+                );
+            }
+
+            if fee_amount > 0 {
+                if let Some(fee_recipient) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, Address>(&DataKey::FeeRecipient)
+                {
+                    client.transfer(
+                        &env.current_contract_address(),
+                        &fee_recipient,
+                        &fee_amount,
+                    );
+                    events::emit_refund_fee_collected(&env, refund_id, fee_amount);
+                }
+            }
+
+            // Update cumulative refunded amount
+            let already_refunded: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RefundedAmount(refund.payment_id))
+                .unwrap_or(0);
+            let new_total = already_refunded + refund.amount;
+            env.storage()
+                .persistent()
+                .set(&DataKey::RefundedAmount(refund.payment_id), &new_total);
+            env.storage().persistent().extend_ttl(
+                &DataKey::RefundedAmount(refund.payment_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+
+            refund.status = RefundStatus::Processed;
+            refund.processed_at = Some(now);
+            refund.fee_amount = if fee_amount > 0 { Some(fee_amount) } else { None };
+
+            Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+        } else {
+            // Final rejection — return escrowed funds to customer
+            client.transfer(
+                &env.current_contract_address(),
+                &refund.customer,
+                &refund.amount,
+            );
+
+            refund.status = RefundStatus::Rejected;
+            refund.rejected_at = Some(now);
+
+            Self::update_stats_on_reject(&env, &refund.merchant);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_appeal_resolved(&env, refund_id, approve);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the configured appeal window in seconds.
+    pub fn get_appeal_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AppealWindow)
+            .expect("Appeal window not configured")
+    }
+
+    // -------------------------------------------------------------------------
+    // #164: Paginated Admin Refund Queue View
+    // -------------------------------------------------------------------------
+
+    /// Get paginated list of pending (Requested) refund IDs.
+    /// page_size is capped at 50. Returns (refund_ids, total, has_more).
+    pub fn get_pending_refund_queue(
+        env: Env,
+        page: u32,
+        page_size: u32,
+    ) -> (Vec<u32>, u32, bool) {
+        let effective_size = page_size.min(50);
+        let queue: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRefundQueue)
+            .unwrap_or(Vec::new(&env));
+        let total = queue.len();
+        let start = (page * effective_size).min(total);
+        let end = (start + effective_size).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(queue.get(i).unwrap());
+        }
+        let has_more = end < total;
+        (result, total, has_more)
+    }
+
+    /// Get the count of pending (Requested) refunds in the queue.
+    pub fn get_pending_refund_count(env: Env) -> u32 {
+        let queue: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRefundQueue)
+            .unwrap_or(Vec::new(&env));
+        queue.len()
+    }
+
     /// Register a refund from the escrow contract. Only callable by the configured escrow contract.
     /// Creates a refund record in Processed status (no approval needed).
     pub fn register_escrow_refund(
@@ -754,9 +1204,11 @@ impl AhjoorRefundContract {
             token: token.clone(),
             status: RefundStatus::Processed,
             reason: String::from_str(&env, "escrow_refund"),
+            reason_code: 4, // Other
             requested_at: now,
             approved_at: Some(now),
             processed_at: Some(now),
+            rejected_at: None,
             auto_approved_source: None,
             escrow_id: Some(escrow_id),
             fee_amount: None,
@@ -1189,6 +1641,45 @@ impl AhjoorRefundContract {
             .set(&DataKey::MerchantRefundStats(merchant.clone()), &merchant_stats);
         env.storage().persistent().extend_ttl(
             &DataKey::MerchantRefundStats(merchant.clone()),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    fn append_to_pending_queue(env: &Env, refund_id: u32) {
+        let mut queue: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRefundQueue)
+            .unwrap_or(Vec::new(env));
+        queue.push_back(refund_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingRefundQueue, &queue);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingRefundQueue,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    fn remove_from_pending_queue(env: &Env, refund_id: u32) {
+        let queue: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingRefundQueue)
+            .unwrap_or(Vec::new(env));
+        let mut new_queue = Vec::new(env);
+        for id in queue.iter() {
+            if id != refund_id {
+                new_queue.push_back(id);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingRefundQueue, &new_queue);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingRefundQueue,
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );

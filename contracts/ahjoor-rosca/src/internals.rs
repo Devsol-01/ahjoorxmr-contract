@@ -169,6 +169,27 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
         &DataKey::RoundDeadline,
         &(env.ledger().timestamp() + duration),
     );
+
+    // Update timestamp-based deadline if enabled
+    let use_timestamp: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::UseTimestampSchedule)
+        .unwrap_or(false);
+
+    if use_timestamp {
+        let duration_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RoundDurationSeconds)
+            .unwrap_or(0);
+        let next_timestamp_deadline = env.ledger().timestamp() + duration_seconds;
+        env.storage()
+            .instance()
+            .set(&DataKey::RoundDeadlineTimestamp, &next_timestamp_deadline);
+        events::emit_round_deadline_timestamp_set(env, current_round + 1, next_timestamp_deadline);
+    }
+
     events::emit_reset(env, current_round);
 }
 
@@ -211,6 +232,34 @@ pub(crate) fn execute_rule_change(env: &Env, new_quorum: Option<i128>) {
                 .instance()
                 .set(&DataKey::QuorumPercentage, &(quorum as u32));
             events::emit_rule_upd(env, quorum);
+        }
+    }
+}
+
+/// Updates the maximum member limit if the value is within [1, 100] and >= current count.
+pub(crate) fn execute_max_members_update(env: &Env, new_max_val: Option<i128>) {
+    if let Some(new_max_i128) = new_max_val {
+        let new_max = new_max_i128 as u32;
+        if new_max >= 1 && new_max <= 100 {
+            let current_members: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::Members)
+                .unwrap_or(Vec::new(env));
+
+            if new_max >= current_members.len() as u32 {
+                let old_max: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MaxMembers)
+                    .unwrap_or(50);
+
+                env.storage()
+                    .instance()
+                    .set(&DataKey::MaxMembers, &new_max);
+
+                events::emit_max_members_upd(env, old_max, new_max);
+            }
         }
     }
 }

@@ -351,8 +351,238 @@ fn test_get_member_contribution_status() {
 }
 
 // ============================================================================
-// FEATURE 3: Configurable Defaulter Suspension Threshold
+// FEATURE: Payout Scheduling by Target Calendar Date
 // ============================================================================
+
+#[test]
+fn test_timestamp_based_scheduling() {
+    let (env, client, admin, token_admin, _, _, members) = 
+        setup_with_members(2, 1000);
+
+    let round_duration_seconds = 86400 * 30; // 30 days
+    
+    env.ledger().set_timestamp(1000000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600, // This is the old round_duration (ledger-based)
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            use_timestamp_schedule: true,
+            round_duration_seconds,
+        },
+    );
+
+    // Initial deadline should be 1000000 + 30 days
+    let expected_deadline = 1000000 + round_duration_seconds;
+    assert_eq!(client.get_next_deadline_timestamp(), expected_deadline);
+
+    // Upcoming deadlines should reflect timestamp-based scheduling
+    let upcoming = client.get_upcoming_deadlines(&3);
+    assert_eq!(upcoming.get(0).unwrap(), expected_deadline);
+    assert_eq!(upcoming.get(1).unwrap(), expected_deadline + round_duration_seconds);
+    assert_eq!(upcoming.get(2).unwrap(), expected_deadline + 2 * round_duration_seconds);
+
+    // Contribute within deadline
+    env.ledger().set_timestamp(1000000 + 86400); // 1 day later
+    client.contribute(&members.get(0).unwrap(), &token_admin, &100);
+
+    // Contribute outside old deadline (3600) but inside new one
+    env.ledger().set_timestamp(1000000 + 7200); 
+    client.contribute(&members.get(1).unwrap(), &token_admin, &100);
+
+    // After round completes (due to 2/2 members contributing), next deadline should be updated correctly
+    let current_timestamp = env.ledger().timestamp();
+    let next_expected_deadline = current_timestamp + round_duration_seconds;
+    assert_eq!(client.get_next_deadline_timestamp(), next_expected_deadline);
+    
+    let (_, _, deadline, _, _) = client.get_state();
+    assert_eq!(deadline, next_expected_deadline);
+}
+
+// ============================================================================
+// FEATURE: Maximum Member Limit
+// ============================================================================
+
+#[test]
+fn test_max_members_enforcement() {
+    let (env, client, admin, token_admin, _, _, members) = 
+        setup_with_members(2, 1000);
+
+    // Init with max_members = 2
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: Some(2),
+        },
+    );
+
+    assert_eq!(client.get_max_members(), 2);
+
+    // Try to add a 3rd member - should fail
+    let user3 = Address::generate(&env);
+    let result = client.try_add_member(&user3);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_update_max_members() {
+    let (env, client, admin, token_admin, _, _, members) = 
+        setup_with_members(2, 1000);
+
+    // Init with default max_members (50)
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+        },
+    );
+
+    assert_eq!(client.get_max_members(), 50);
+
+    // Update max_members to 10
+    client.update_max_members(&10);
+    assert_eq!(client.get_max_members(), 10);
+
+    // Try to decrease below current member count (2) - should fail
+    let result = client.try_update_max_members(&1);
+    assert!(result.is_err());
+
+    // Try to increase above 100 - should fail
+    let result = client.try_update_max_members(&101);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_max_members_boundary() {
+    let (env, client, admin, token_admin, _, _, members) = 
+        setup_with_members(2, 1000);
+
+    // Init with max_members = 3
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: Some(3),
+        },
+    );
+
+    // Add member at capacity minus 1 (currently 2, capacity 3)
+    let user3 = Address::generate(&env);
+    client.add_member(&user3);
+    assert_eq!(client.get_max_members(), 3);
+
+    // Now at capacity (3/3), try to add another - should fail
+    let user4 = Address::generate(&env);
+    let result = client.try_add_member(&user4);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_max_members_proposal() {
+    let (env, client, admin, token_admin, _, _, members) = 
+        setup_with_members(2, 1000);
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_admin,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 0,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: Some(5),
+        },
+    );
+
+    let user1 = members.get(0).unwrap();
+    let user2 = members.get(1).unwrap();
+
+    // Create proposal to increase max_members to 10
+    client.create_proposal(
+        &user1,
+        &ProposalType::MaxMembersUpdate,
+        &user1, // target doesn't matter much here
+        &soroban_sdk::String::from_str(&env, "Increase max members"),
+        &Some(10),
+    );
+
+    let proposal_id = 0;
+    client.vote(&user1, &proposal_id, &true);
+    client.vote(&user2, &proposal_id, &true);
+
+    // Advance time to end voting
+    env.ledger().set_timestamp(env.ledger().timestamp() + 86400 * 8); // > 7 days default
+
+    client.execute_proposal(&proposal_id);
+
+    assert_eq!(client.get_max_members(), 10);
+}
 
 #[test]
 fn test_configurable_max_defaults() {

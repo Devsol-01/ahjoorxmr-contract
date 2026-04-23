@@ -306,12 +306,43 @@ pub struct ContractUpgraded {
 
 // --- Helper Emission Functions ---
 
+/// Event: Suspension threshold configuration updated
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SuspensionThresholdSet {
+    pub max_defaults: u32,
+}
+
+/// Event: Round deadline timestamp set
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundDeadlineTimestampSet {
+    pub round: u32,
+    pub timestamp: u64,
+}
+
+/// Event: Maximum member limit updated
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MaxMembersUpdated {
+    pub old_max: u32,
+    pub new_max: u32,
+}
+
 pub fn emit_rosc_init(e: &Env, member_count: u32, contribution_amount: i128) {
     RoscaInitialized {
         member_count,
         contribution_amount,
     }
     .publish(e);
+}
+
+pub fn emit_round_deadline_timestamp_set(e: &Env, round: u32, timestamp: u64) {
+    RoundDeadlineTimestampSet { round, timestamp }.publish(e);
+}
+
+pub fn emit_max_members_upd(e: &Env, old_max: u32, new_max: u32) {
+    MaxMembersUpdated { old_max, new_max }.publish(e);
 }
 
 pub fn emit_contrib(e: &Env, contributor: Address, round: u32, token: Address, amount: i128) {

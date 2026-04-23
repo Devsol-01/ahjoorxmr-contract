@@ -41,4 +41,8 @@ pub enum Error {
     FeeExceedsMaximum = 34,
     /// Max defaults must be at least 1.
     InvalidMaxDefaults = 35,
+    /// Maximum members reached.
+    GroupFull = 36,
+    /// Invalid maximum member count (must be between 1 and 100).
+    InvalidMaxMembers = 37,
 }

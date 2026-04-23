@@ -30,6 +30,9 @@ pub struct RoscaConfig {
     pub fee_recipient: Option<Address>,
     /// Number of consecutive missed rounds before suspension (default: 3)
     pub max_defaults: u32,
+    pub use_timestamp_schedule: bool,
+    pub round_duration_seconds: u64,
+    pub max_members: Option<u32>,
 }
 
 #[contracttype]
@@ -83,6 +86,7 @@ pub enum ProposalType {
     PenaltyAppeal = 0,
     RuleChange = 1,
     MemberRemoval = 2,
+    MaxMembersUpdate = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +182,10 @@ pub enum DataKey {
     FeeBps,                  // u32 — protocol fee in basis points
     FeeRecipient,            // Address — receives protocol fees
     MaxDefaults,             // u32 — suspension threshold (consecutive missed rounds)
+    UseTimestampSchedule,   // bool
+    RoundDurationSeconds,   // u64
+    RoundDeadlineTimestamp, // u64
+    MaxMembers,             // u32
     // --- Persistent ---
     RoundHistory, // Vec<PayoutRecord> — grows every round
     // --- Temporary ---

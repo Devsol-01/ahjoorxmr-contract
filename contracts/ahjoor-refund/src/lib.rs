@@ -134,6 +134,8 @@ pub enum DataKey {
     AppealWindow,
     /// Ordered queue of pending (Requested) refund IDs (#164)
     PendingRefundQueue,
+    /// Tiered refund policy: Vec<(max_seconds_since_payment, refund_bps)>.
+    RefundTiers,
 }
 
 mod events;
@@ -156,6 +158,7 @@ impl AhjoorRefundContract {
         fee_recipient: Option<Address>,
         auto_reject_window_seconds: u64,
         appeal_window_seconds: u64,
+        refund_tiers: Option<Vec<(u64, u32)>>,
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("Already initialized");
@@ -194,6 +197,10 @@ impl AhjoorRefundContract {
                 .instance()
                 .set(&DataKey::FeeRecipient, &recipient);
         }
+
+        let tiers = refund_tiers.unwrap_or(Vec::new(&env));
+        Self::validate_refund_tiers(&tiers);
+        env.storage().instance().set(&DataKey::RefundTiers, &tiers);
 
         // Issue #161: Initialize global stats
         let initial_stats = RefundStats {
@@ -294,7 +301,41 @@ impl AhjoorRefundContract {
             .persistent()
             .get(&DataKey::RefundedAmount(payment_id))
             .unwrap_or(0);
-        if amount + already_refunded > payment.amount {
+
+        let mut effective_amount = amount;
+        let tiers = Self::get_refund_tiers(env.clone());
+        let mut applied_tier_bps: Option<u32> = None;
+        let mut tier_max_refundable: Option<i128> = None;
+
+        if !tiers.is_empty() {
+            let elapsed = env.ledger().timestamp().saturating_sub(payment.created_at);
+            let mut matched = false;
+            for i in 0..tiers.len() {
+                let (max_seconds, tier_bps) = tiers.get(i).unwrap();
+                if elapsed <= max_seconds {
+                    matched = true;
+                    let absolute_cap = (payment.amount as u128 * tier_bps as u128 / 10_000) as i128;
+                    let remaining_under_tier = absolute_cap.saturating_sub(already_refunded);
+                    if remaining_under_tier <= 0 {
+                        panic!("ExceedsRefundableAmount");
+                    }
+                    effective_amount = if amount > remaining_under_tier {
+                        remaining_under_tier
+                    } else {
+                        amount
+                    };
+                    applied_tier_bps = Some(tier_bps);
+                    tier_max_refundable = Some(remaining_under_tier);
+                    break;
+                }
+            }
+
+            if !matched {
+                panic!("RefundWindowExpired");
+            }
+        }
+
+        if effective_amount + already_refunded > payment.amount {
             panic!("ExceedsRefundableAmount");
         }
 
@@ -303,7 +344,7 @@ impl AhjoorRefundContract {
 
         // Escrow funds to this contract so approved refunds can be processed.
         let client = token::Client::new(&env, &token);
-        client.transfer(&customer, &env.current_contract_address(), &amount);
+        client.transfer(&customer, &env.current_contract_address(), &effective_amount);
 
         let refund_id = Self::next_refund_id(&env);
 
@@ -321,7 +362,7 @@ impl AhjoorRefundContract {
             payment_id,
             customer: customer.clone(),
             merchant: merchant.clone(),
-            amount,
+            amount: effective_amount,
             token: token.clone(),
             status: initial_status,
             reason,
@@ -382,9 +423,16 @@ impl AhjoorRefundContract {
 
         events::emit_refund_requested(&env, refund_id, customer, amount, token, refund.reason);
         events::emit_refund_reason_recorded(&env, refund_id, reason_code);
+        Self::update_stats_on_request(&env, &merchant, effective_amount);
+
+        events::emit_refund_requested(&env, refund_id, customer, effective_amount, token, refund.reason);
+
+        if let (Some(tier_bps), Some(max_refundable)) = (applied_tier_bps, tier_max_refundable) {
+            events::emit_refund_tier_applied(&env, refund_id, tier_bps, max_refundable);
+        }
 
         if is_whitelisted {
-            events::emit_refund_auto_approved_whitelist(&env, refund_id, merchant, amount);
+            events::emit_refund_auto_approved_whitelist(&env, refund_id, merchant, effective_amount);
         }
 
         env.storage()
@@ -507,73 +555,28 @@ impl AhjoorRefundContract {
             panic!("Only admin can process refunds");
         }
 
-        let mut refund: Refund = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Refund(refund_id))
-            .expect("Refund not found");
+        Self::process_refund_internal(&env, refund_id);
 
-        if refund.status != RefundStatus::Approved {
-            panic!("Refund is not approved");
-        }
-
-        let fee_bps: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::RefundFeeBps)
-            .unwrap_or(0);
-
-        let fee_amount = if fee_bps > 0 {
-            (refund.amount as u128 * fee_bps as u128 / 10_000) as i128
-        } else {
-            0
-        };
-
-        let customer_amount = refund.amount - fee_amount;
-
-        // Transfer tokens to customer
-        let client = token::Client::new(&env, &refund.token);
-        if customer_amount > 0 {
-            client.transfer(
-                &env.current_contract_address(),
-                &refund.customer,
-                &customer_amount,
-            );
-        }
-
-        // Transfer fee to fee recipient if configured
-        if fee_amount > 0 {
-            if let Some(fee_recipient) = env
-                .storage()
-                .instance()
-                .get::<DataKey, Address>(&DataKey::FeeRecipient)
-            {
-                client.transfer(
-                    &env.current_contract_address(),
-                    &fee_recipient,
-                    &fee_amount,
-                );
-                events::emit_refund_fee_collected(&env, refund_id, fee_amount);
-            }
-        }
-
-        // Update cumulative refunded amount for this payment
-        let already_refunded: i128 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::RefundedAmount(refund.payment_id))
-            .unwrap_or(0);
-        let new_total = already_refunded + refund.amount;
         env.storage()
-            .persistent()
-            .set(&DataKey::RefundedAmount(refund.payment_id), &new_total);
-        env.storage().persistent().extend_ttl(
-            &DataKey::RefundedAmount(refund.payment_id),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
 
-        // Emit cap event when remaining refundable is low (< 10% of original or zero)
+    /// Merchant initiates an immediate refund directly to customer.
+    pub fn merchant_refund(
+        env: Env,
+        merchant: Address,
+        payment_id: u32,
+        amount: i128,
+        reason_code: u32,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        merchant.require_auth();
+
+        if amount <= 0 {
+            panic!("Refund amount must be positive");
+        }
+
         let payment_contract_addr: Address = env
             .storage()
             .instance()
@@ -581,20 +584,50 @@ impl AhjoorRefundContract {
             .expect("Payment contract not configured");
         let payment_client =
             payment_contract::PaymentContractClient::new(&env, &payment_contract_addr);
-        if let Ok(Ok(payment)) = payment_client.try_get_payment(&refund.payment_id) {
-            let remaining_refundable = payment.amount - new_total;
-            if remaining_refundable <= payment.amount / 10 {
-                events::emit_partial_refund_cap_applied(
-                    &env,
-                    refund_id,
-                    remaining_refundable,
-                );
-            }
+        let payment = payment_client
+            .try_get_payment(&payment_id)
+            .unwrap_or_else(|_| panic!("PaymentContractError: payment not found"))
+            .unwrap_or_else(|_| panic!("PaymentContractError: payment not found"));
+
+        if payment.merchant != merchant {
+            panic!("Only payment merchant can initiate refund");
         }
 
-        refund.status = RefundStatus::Processed;
-        refund.processed_at = Some(env.ledger().timestamp());
-        refund.fee_amount = if fee_amount > 0 { Some(fee_amount) } else { None };
+        if amount > payment.amount {
+            panic!("ExceedsRefundableAmount");
+        }
+
+        let already_refunded: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RefundedAmount(payment_id))
+            .unwrap_or(0);
+        let remaining = payment.amount.saturating_sub(already_refunded);
+        if amount > remaining {
+            panic!("MerchantBalanceInsufficient");
+        }
+
+        let token_client = token::Client::new(&env, &payment.token);
+        token_client.transfer(&merchant, &payment.customer, &amount);
+
+        let refund_id = Self::next_refund_id(&env);
+        let now = env.ledger().timestamp();
+        let refund = Refund {
+            id: refund_id,
+            payment_id,
+            customer: payment.customer.clone(),
+            merchant: merchant.clone(),
+            amount,
+            token: payment.token.clone(),
+            status: RefundStatus::Processed,
+            reason: String::from_str(&env, "merchant_initiated"),
+            requested_at: now,
+            approved_at: Some(now),
+            processed_at: Some(now),
+            auto_approved_source: Some(String::from_str(&env, "merchant_direct")),
+            escrow_id: None,
+            fee_amount: None,
+        };
 
         env.storage()
             .persistent()
@@ -605,19 +638,97 @@ impl AhjoorRefundContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
-        Self::update_stats_on_process(&env, &refund.merchant, refund.amount);
+        Self::append_index(&env, &DataKey::CustomerRefunds(payment.customer.clone()), refund_id);
+        Self::append_index(&env, &DataKey::MerchantRefunds(merchant.clone()), refund_id);
+        Self::append_index(&env, &DataKey::PaymentRefunds(payment_id), refund_id);
 
-        events::emit_refund_processed(
-            &env,
-            refund_id,
-            refund.customer,
-            customer_amount,
-            refund.processed_at.unwrap(),
+        let new_total = already_refunded + amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RefundedAmount(payment_id), &new_total);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RefundedAmount(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
         );
 
+        Self::update_stats_on_request(&env, &merchant, amount);
+        Self::update_stats_on_process(&env, &merchant, amount);
+
+        events::emit_merchant_initiated_refund(
+            &env,
+            refund_id,
+            payment_id,
+            merchant,
+            amount,
+            reason_code,
+        );
+
+        refund_id
+    }
+
+    /// Process up to 20 approved refunds atomically.
+    pub fn bulk_process_refunds(env: Env, admin: Address, refund_ids: Vec<u32>) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can process refunds");
+        }
+
+        if refund_ids.is_empty() {
+            panic!("Refund batch cannot be empty");
+        }
+        if refund_ids.len() > 20 {
+            panic!("BatchTooLarge");
+        }
+
+        for i in 0..refund_ids.len() {
+            let rid = refund_ids.get(i).unwrap();
+            let refund: Refund = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Refund(rid))
+                .expect("Refund not found");
+            if refund.status != RefundStatus::Approved {
+                panic!("Refund is not approved");
+            }
+        }
+
+        let mut total_amount: i128 = 0;
+        for i in 0..refund_ids.len() {
+            let rid = refund_ids.get(i).unwrap();
+            let refund: Refund = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Refund(rid))
+                .expect("Refund not found");
+            total_amount += refund.amount;
+            Self::process_refund_internal(&env, rid);
+        }
+
+        events::emit_bulk_refund_processed(&env, refund_ids.len(), total_amount);
+    }
+
+    pub fn set_refund_tiers(env: Env, admin: Address, tiers: Vec<(u64, u32)>) {
+        Self::require_admin(&env, &admin);
+        Self::validate_refund_tiers(&tiers);
+        env.storage().instance().set(&DataKey::RefundTiers, &tiers);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_refund_tiers(env: Env) -> Vec<(u64, u32)> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RefundTiers)
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Auto-approve a refund once the dispute window has elapsed without merchant action.
@@ -1705,6 +1816,122 @@ impl AhjoorRefundContract {
             &DataKey::MerchantRefundStats(merchant.clone()),
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    fn validate_refund_tiers(tiers: &Vec<(u64, u32)>) {
+        let mut prev_max = 0u64;
+        for i in 0..tiers.len() {
+            let (max_seconds_since_payment, refund_bps) = tiers.get(i).unwrap();
+            if i > 0 && max_seconds_since_payment < prev_max {
+                panic!("Refund tiers must be sorted by max_seconds_since_payment");
+            }
+            if refund_bps > 10_000 {
+                panic!("Refund tier bps must be <= 10000");
+            }
+            prev_max = max_seconds_since_payment;
+        }
+    }
+
+    fn process_refund_internal(env: &Env, refund_id: u32) {
+        let mut refund: Refund = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Refund(refund_id))
+            .expect("Refund not found");
+
+        if refund.status != RefundStatus::Approved {
+            panic!("Refund is not approved");
+        }
+
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundFeeBps)
+            .unwrap_or(0);
+
+        let fee_amount = if fee_bps > 0 {
+            (refund.amount as u128 * fee_bps as u128 / 10_000) as i128
+        } else {
+            0
+        };
+
+        let customer_amount = refund.amount - fee_amount;
+
+        let client = token::Client::new(env, &refund.token);
+        if customer_amount > 0 {
+            client.transfer(
+                &env.current_contract_address(),
+                &refund.customer,
+                &customer_amount,
+            );
+        }
+
+        if fee_amount > 0 {
+            if let Some(fee_recipient) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::FeeRecipient)
+            {
+                client.transfer(
+                    &env.current_contract_address(),
+                    &fee_recipient,
+                    &fee_amount,
+                );
+                events::emit_refund_fee_collected(env, refund_id, fee_amount);
+            }
+        }
+
+        let already_refunded: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RefundedAmount(refund.payment_id))
+            .unwrap_or(0);
+        let new_total = already_refunded + refund.amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RefundedAmount(refund.payment_id), &new_total);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RefundedAmount(refund.payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let payment_contract_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentContractAddress)
+            .expect("Payment contract not configured");
+        let payment_client =
+            payment_contract::PaymentContractClient::new(env, &payment_contract_addr);
+        if let Ok(Ok(payment)) = payment_client.try_get_payment(&refund.payment_id) {
+            let remaining_refundable = payment.amount - new_total;
+            if remaining_refundable <= payment.amount / 10 {
+                events::emit_partial_refund_cap_applied(env, refund_id, remaining_refundable);
+            }
+        }
+
+        refund.status = RefundStatus::Processed;
+        refund.processed_at = Some(env.ledger().timestamp());
+        refund.fee_amount = if fee_amount > 0 { Some(fee_amount) } else { None };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Refund(refund_id), &refund);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Refund(refund_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        Self::update_stats_on_process(env, &refund.merchant, refund.amount);
+
+        events::emit_refund_processed(
+            env,
+            refund_id,
+            refund.customer,
+            customer_amount,
+            refund.processed_at.unwrap(),
         );
     }
 }

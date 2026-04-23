@@ -75,6 +75,14 @@ pub struct RefundAutoApproved {
     pub amount: i128,
 }
 
+/// Event: Partial refund cap applied — emitted when remaining refundable is near zero
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialRefundCapApplied {
+    pub refund_id: u32,
+    pub remaining_refundable: i128,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_refund_requested(
@@ -149,6 +157,14 @@ pub fn emit_refund_auto_approved(e: &Env, refund_id: u32, customer: Address, amo
         refund_id,
         customer,
         amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_partial_refund_cap_applied(e: &Env, refund_id: u32, remaining_refundable: i128) {
+    PartialRefundCapApplied {
+        refund_id,
+        remaining_refundable,
     }
     .publish(e);
 }

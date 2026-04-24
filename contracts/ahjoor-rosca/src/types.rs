@@ -15,6 +15,13 @@ pub enum DistributionType {
     Weighted = 2,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum VotingMode {
+    Equal = 0,
+    WeightedByContributions = 1,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoscaConfig {
@@ -35,6 +42,7 @@ pub struct RoscaConfig {
     pub max_members: Option<u32>,
     pub skip_fee: i128,
     pub max_skips_per_cycle: u32,
+    pub voting_mode: VotingMode,
 }
 
 #[contracttype]
@@ -108,8 +116,8 @@ pub struct Proposal {
     pub creator: Address,
     pub description: String,
     pub target_member: Address,
-    pub votes_for: u32,
-    pub votes_against: u32,
+    pub votes_for: i128,
+    pub votes_against: i128,
     pub created_at: u64,
     pub deadline: u64,
     pub status: ProposalStatus,
@@ -196,6 +204,8 @@ pub enum DataKey {
     SkipRequests,            // Map<(Address, u32), bool>
     MemberSkips,             // Map<(Address, u32), u32> (Address, Cycle) -> Count
     QuorumConfig,            // Map<ProposalType, u32> (Type -> Quorum Bps)
+    VotingMode,              // VotingMode
+    ReinvestPreference,      // Map<Address, bool>
     // --- Persistent ---
     RoundHistory, // Vec<PayoutRecord> — grows every round
     // --- Temporary ---

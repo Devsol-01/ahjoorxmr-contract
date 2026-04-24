@@ -24,6 +24,8 @@ mod errors;
 mod events;
 mod internals;
 mod test_tiers;
+mod test_weighted_voting;
+mod test_reinvest;
 
 use errors::Error;
 
@@ -265,6 +267,16 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::MemberSkips, &Map::<(Address, u32), u32>::new(&env));
+
+        // Voting Mode Initialization
+        env.storage()
+            .instance()
+            .set(&DataKey::VotingMode, &config.voting_mode);
+
+        // Reinvestment Initialization
+        env.storage()
+            .instance()
+            .set(&DataKey::ReinvestPreference, &Map::<Address, bool>::new(&env));
 
         // Governance Initialization
         env.storage()
@@ -1694,7 +1706,89 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    pub fn vote_on_proposal(env: Env, voter: Address, proposal_id: u32, vote_for: bool) {
+    pub fn get_member_voting_weight(env: Env, member: Address) -> i128 {
+        let voting_mode: VotingMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::VotingMode)
+            .unwrap_or(VotingMode::Equal);
+
+        match voting_mode {
+            VotingMode::Equal => 1i128,
+            VotingMode::WeightedByContributions => {
+                let contributions: Map<Address, i128> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MemberContributions)
+                    .unwrap_or(Map::new(&env));
+                contributions.get(member).unwrap_or(0)
+            }
+        }
+    }
+
+    /// Set a member's preference for auto-reinvesting payouts into the next round.
+    /// Preference can be toggled anytime before the current round's contribution deadline.
+    pub fn set_reinvest_preference(env: Env, member: Address, reinvest: bool) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
+
+        let use_timestamp: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::UseTimestampSchedule)
+            .unwrap_or(false);
+
+        let deadline: u64 = if use_timestamp {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadlineTimestamp)
+                .expect("Timestamp deadline not set")
+        } else {
+            env.storage()
+                .instance()
+                .get(&DataKey::RoundDeadline)
+                .expect("Deadline not set")
+        };
+
+        if env.ledger().timestamp() > deadline {
+            panic_with_error!(&env, Error::ContributionWindowClosed);
+        }
+
+        let mut preferences: Map<Address, bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReinvestPreference)
+            .unwrap_or(Map::new(&env));
+
+        preferences.set(member, reinvest);
+        env.storage()
+            .instance()
+            .set(&DataKey::ReinvestPreference, &preferences);
+
+        env.storage()
+             .instance()
+             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+     }
+
+    pub fn get_reinvest_preference(env: Env, member: Address) -> bool {
+        let preferences: Map<Address, bool> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ReinvestPreference)
+            .unwrap_or(Map::new(&env));
+        preferences.get(member).unwrap_or(false)
+    }
+
+     pub fn vote_on_proposal(env: Env, voter: Address, proposal_id: u32, vote_for: bool) {
         internals::check_not_paused(&env);
         voter.require_auth();
 
@@ -1747,26 +1841,35 @@ impl AhjoorContract {
         }
 
         votes.set(voter.clone(), vote_for);
-        proposal_votes.set(proposal_id, votes);
+        proposal_votes.set(proposal_id, votes.clone()); // cloned for delegation loop
+
+        let voter_weight = Self::get_member_voting_weight(env.clone(), voter.clone());
+        if voter_weight == 0 {
+            let voting_mode: VotingMode = env.storage().instance().get(&DataKey::VotingMode).unwrap_or(VotingMode::Equal);
+            if voting_mode == VotingMode::WeightedByContributions {
+                panic_with_error!(&env, Error::InsufficientWeight);
+            }
+        }
 
         if vote_for {
-            proposal.votes_for += 1;
+            proposal.votes_for += voter_weight;
         } else {
-            proposal.votes_against += 1;
+            proposal.votes_against += voter_weight;
         }
 
         // Count votes from delegators
-        let mut delegator_votes_for = 0u32;
-        let mut delegator_votes_against = 0u32;
+        let mut delegator_votes_for = 0i128;
+        let mut delegator_votes_against = 0i128;
         for (delegator, delegate) in delegations.iter() {
             if delegate == voter {
                 // This voter is a delegate; check if delegator hasn't voted yet
                 let delegator_voted = votes.contains_key(delegator.clone());
                 if !delegator_voted {
+                    let delegator_weight = Self::get_member_voting_weight(env.clone(), delegator.clone());
                     if vote_for {
-                        delegator_votes_for += 1;
+                        delegator_votes_for += delegator_weight;
                     } else {
-                        delegator_votes_against += 1;
+                        delegator_votes_against += delegator_weight;
                     }
                     // Mark delegator as voted
                     votes.set(delegator.clone(), vote_for);
@@ -1777,6 +1880,7 @@ impl AhjoorContract {
         proposal.votes_for += delegator_votes_for;
         proposal.votes_against += delegator_votes_against;
 
+        proposal_votes.set(proposal_id, votes);
         proposals.set(proposal_id, proposal);
         env.storage()
             .instance()
@@ -1785,7 +1889,17 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::ProposalVotes, &proposal_votes);
 
-        events::emit_voted(&env, proposal_id, voter, vote_for);
+        let voting_mode: VotingMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::VotingMode)
+            .unwrap_or(VotingMode::Equal);
+        
+        if voting_mode == VotingMode::WeightedByContributions {
+            events::emit_weighted_vote_cast(&env, voter, proposal_id, voter_weight);
+        } else {
+            events::emit_voted(&env, proposal_id, voter, vote_for);
+        }
 
         env.storage()
             .instance()
@@ -1821,8 +1935,31 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::VotingNotEnded);
         }
 
+        let voting_mode: VotingMode = env
+            .storage()
+            .instance()
+            .get(&DataKey::VotingMode)
+            .unwrap_or(VotingMode::Equal);
+
         let total_votes = proposal.votes_for + proposal.votes_against;
-        let required_votes = ((members.len() as u32 * proposal.required_quorum) + 9999) / 10000;
+
+        let total_possible_votes = match voting_mode {
+            VotingMode::Equal => members.len() as i128,
+            VotingMode::WeightedByContributions => {
+                let contributions: Map<Address, i128> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MemberContributions)
+                    .unwrap_or(Map::new(&env));
+                let mut total = 0i128;
+                for member in members.iter() {
+                    total += contributions.get(member).unwrap_or(0);
+                }
+                total
+            }
+        };
+
+        let required_votes = ((total_possible_votes * proposal.required_quorum as i128) + 9999) / 10000;
 
         if total_votes < required_votes {
             proposal.status = ProposalStatus::Rejected;

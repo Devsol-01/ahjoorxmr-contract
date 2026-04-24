@@ -59,6 +59,9 @@ fn test_tiered_contributions() {
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -116,6 +119,9 @@ fn test_invalid_tier_rejected() {
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -151,6 +157,9 @@ fn test_mixed_tiers_pot_size() {
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 

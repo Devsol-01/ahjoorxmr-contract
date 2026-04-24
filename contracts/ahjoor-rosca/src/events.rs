@@ -142,14 +142,23 @@ pub struct VoteCast {
     pub vote_for: bool,
 }
 
+/// Event: Weighted vote cast on a proposal
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct WeightedVoteCast {
+    pub member: Address,
+    pub proposal_id: u32,
+    pub weight: i128,
+}
+
 /// Event: Proposal rejected
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct ProposalRejected {
     pub proposal_id: u32,
     pub reason: Symbol,
-    pub votes_for: u32,
-    pub votes_against: u32,
+    pub votes_for: i128,
+    pub votes_against: i128,
 }
 
 /// Event: Proposal executed
@@ -252,6 +261,15 @@ pub struct RoundCompleted {
     pub round: u32,
     pub recipient: Address,
     pub payout_amount: i128,
+}
+
+/// Event: Payout reinvested into next round
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutReinvested {
+    pub member: Address,
+    pub round: u32,
+    pub amount: i128,
 }
 
 /// Event: Member requested to skip a round
@@ -484,12 +502,21 @@ pub fn emit_voted(e: &Env, proposal_id: u32, voter: Address, vote_for: bool) {
     .publish(e);
 }
 
+pub fn emit_weighted_vote_cast(e: &Env, member: Address, proposal_id: u32, weight: i128) {
+    WeightedVoteCast {
+        member,
+        proposal_id,
+        weight,
+    }
+    .publish(e);
+}
+
 pub fn emit_prop_rej(
     e: &Env,
     proposal_id: u32,
     reason: Symbol,
-    votes_for: u32,
-    votes_against: u32,
+    votes_for: i128,
+    votes_against: i128,
 ) {
     ProposalRejected {
         proposal_id,
@@ -578,6 +605,15 @@ pub fn emit_rd_done(e: &Env, round: u32, recipient: Address, payout_amount: i128
         round,
         recipient,
         payout_amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_payout_reinvested(e: &Env, member: Address, round: u32, amount: i128) {
+    PayoutReinvested {
+        member,
+        round,
+        amount,
     }
     .publish(e);
 }

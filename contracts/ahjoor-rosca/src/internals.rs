@@ -63,6 +63,13 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
     }
 
     let payout_recipient = payout_order.get(recipient_idx).unwrap();
+    let preferences: Map<Address, bool> = env
+        .storage()
+        .instance()
+        .get(&DataKey::ReinvestPreference)
+        .unwrap_or(Map::new(env));
+    let should_reinvest = preferences.get(payout_recipient.clone()).unwrap_or(false);
+
     let reward_pool: i128 = env
         .storage()
         .instance()
@@ -88,6 +95,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         .get(&DataKey::FeeRecipient);
 
     let mut total_payout_history_amt = 0i128;
+    let mut reinvested_amount = 0i128;
 
     // Calculate expected pot based on member tiers and check for shortfall
     let base_amount: i128 = env
@@ -167,8 +175,11 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
 
             let payout_amount = balance - fee_amount;
 
-            // Transfer payout to recipient
-            if payout_amount > 0 {
+            if should_reinvest && token_addr == base_token {
+                reinvested_amount = payout_amount;
+                events::emit_payout_reinvested(env, payout_recipient.clone(), current_round, payout_amount);
+            } else if payout_amount > 0 {
+                // Transfer payout to recipient
                 client.transfer(&env.current_contract_address(), &payout_recipient, &payout_amount);
             }
 
@@ -208,10 +219,75 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
     events::emit_rd_done(
         env,
         current_round,
-        payout_recipient,
+        payout_recipient.clone(),
         total_payout_history_amt,
     );
     reset_round_state(env, current_round);
+
+    // Apply reinvestment to the next round's contributions
+    if should_reinvest && reinvested_amount > 0 {
+        let mut next_contributions: Map<Address, i128> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberContributions)
+            .unwrap_or(Map::new(env));
+        
+        next_contributions.set(payout_recipient.clone(), reinvested_amount);
+        env.storage()
+            .instance()
+            .set(&DataKey::MemberContributions, &next_contributions);
+        
+        // Check if this reinvestment fulfills the next round's requirement
+        let base_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ContributionAmt)
+            .unwrap_or(0);
+        let tiers: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::MemberTiers)
+            .unwrap_or(Map::new(env));
+        let tier_bps = tiers.get(payout_recipient.clone()).unwrap_or(10_000);
+        let member_required = (base_amount * tier_bps as i128) / 10_000;
+
+        if reinvested_amount >= member_required {
+            let mut next_paid_members: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PaidMembers)
+                .unwrap_or(Vec::new(env));
+            if !next_paid_members.contains(&payout_recipient) {
+                next_paid_members.push_back(payout_recipient.clone());
+                env.storage()
+                    .instance()
+                    .set(&DataKey::PaidMembers, &next_paid_members);
+            }
+
+            // Track reward participation for the next round
+            let mut total_participations: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalParticipations)
+                .unwrap_or(0);
+            let mut member_participation: Map<Address, u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey::MemberParticipation)
+                .unwrap_or(Map::new(env));
+
+            let current_participation = member_participation.get(payout_recipient.clone()).unwrap_or(0);
+            member_participation.set(payout_recipient.clone(), current_participation + 1);
+            total_participations += 1;
+
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalParticipations, &total_participations);
+            env.storage()
+                .instance()
+                .set(&DataKey::MemberParticipation, &member_participation);
+        }
+    }
 }
 
 /// Advances the round counter, clears paid-members and per-round contributions,

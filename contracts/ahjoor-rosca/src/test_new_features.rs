@@ -63,6 +63,12 @@ fn test_protocol_fee_deducted_from_payout() {
             fee_bps: 200, // 2%
             fee_recipient: Some(fee_recipient.clone()),
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -106,6 +112,12 @@ fn test_protocol_fee_max_cap_enforced() {
             fee_bps: 600, // 6% - exceeds max
             fee_recipient: Some(fee_recipient),
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -135,6 +147,12 @@ fn test_update_fee_function() {
             fee_bps: 100, // 1%
             fee_recipient: Some(fee_recipient),
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -170,6 +188,12 @@ fn test_no_fee_when_fee_bps_zero() {
             fee_bps: 0, // No fee
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -208,6 +232,12 @@ fn test_partial_contribution_installments() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -266,6 +296,12 @@ fn test_partial_contribution_events_emitted() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -297,6 +333,12 @@ fn test_cannot_exceed_remaining_contribution() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -332,6 +374,12 @@ fn test_get_member_contribution_status() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -653,6 +701,12 @@ fn test_suspension_threshold_set_event() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 5,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 }

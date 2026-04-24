@@ -45,8 +45,12 @@ fn test_per_type_quorum_enforced() {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
             skip_fee: 0,
             max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 
@@ -129,8 +133,14 @@ fn test_proposal_respects_quorum_at_creation() {
 
     client.init(&admin, &members, &100, &token_admin, &3600, &RoscaConfig {
         strategy: PayoutStrategy::RoundRobin,
-        custom_order: None, penalty_amount: 0, exit_penalty_bps: 0, collective_goal: None, member_goals: None, fee_bps: 0, fee_recipient: None, max_defaults: 3, skip_fee: 0, max_skips_per_cycle: 0,
-    });
+        custom_order: None, penalty_amount: 0, exit_penalty_bps: 0, collective_goal: None, member_goals: None, fee_bps: 0, fee_recipient: None, max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+        },
 
     let creator = members.get(0).unwrap();
 

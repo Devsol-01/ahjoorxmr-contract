@@ -81,4 +81,6 @@ pub enum Error {
     SkipLimitReached = 54,
     /// Member has already requested a skip for this round.
     AlreadySkipped = 55,
+    /// Member has zero contribution weight in weighted voting mode.
+    InsufficientWeight = 56,
 }

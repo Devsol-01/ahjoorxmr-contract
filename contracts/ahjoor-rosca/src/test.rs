@@ -130,6 +130,12 @@ fn default_init(setup: &TestSetup<'_>) {
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
         },
     );
 }

@@ -1,5 +1,5 @@
 use crate::{PaymentStatus, SplitTransfer};
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
 
 /// Event: Payment receipt issued on completion (#65)
 #[contractevent]
@@ -478,6 +478,98 @@ pub fn emit_merchant_tier_updated(e: &Env, merchant: Address, new_tier_bps: u32,
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Event: Payment tagged with a category (#122)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentCategorized {
+    pub payment_id: u32,
+    pub merchant: Address,
+    pub category: Symbol,
+    pub tags: Vec<Symbol>,
+}
+
+/// Event: Bulk expire batch completed (#123)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BulkExpireCompleted {
+    pub expired_count: u32,
+    pub refund_total: i128,
+}
+
+/// Event: Subscription paused by subscriber (#124)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionPaused {
+    pub sub_id: u32,
+    pub paused_at: u64,
+}
+
+/// Event: Subscription resumed by subscriber (#124)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionResumed {
+    pub sub_id: u32,
+    pub resumed_at: u64,
+}
+
+/// Event: Conditional payment completion attempt (#125)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ConditionalPaymentAttempt {
+    pub payment_id: u32,
+    pub oracle_price: i128,
+    pub threshold: i128,
+    pub met: bool,
+}
+
+pub fn emit_payment_categorized(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    category: Symbol,
+    tags: Vec<Symbol>,
+) {
+    PaymentCategorized {
+        payment_id,
+        merchant,
+        category,
+        tags,
+    }
+    .publish(e);
+}
+
+pub fn emit_bulk_expire_completed(e: &Env, expired_count: u32, refund_total: i128) {
+    BulkExpireCompleted {
+        expired_count,
+        refund_total,
+    }
+    .publish(e);
+}
+
+pub fn emit_subscription_paused(e: &Env, sub_id: u32, paused_at: u64) {
+    SubscriptionPaused { sub_id, paused_at }.publish(e);
+}
+
+pub fn emit_subscription_resumed(e: &Env, sub_id: u32, resumed_at: u64) {
+    SubscriptionResumed { sub_id, resumed_at }.publish(e);
+}
+
+pub fn emit_conditional_payment_attempt(
+    e: &Env,
+    payment_id: u32,
+    oracle_price: i128,
+    threshold: i128,
+    met: bool,
+) {
+    ConditionalPaymentAttempt {
+        payment_id,
+        oracle_price,
+        threshold,
+        met,
+    }
+    .publish(e);
+}
+
 pub fn emit_multi_token_payment_created(
     e: &Env,
     payment_id: u32,

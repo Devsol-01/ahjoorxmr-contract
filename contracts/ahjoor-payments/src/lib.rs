@@ -2,7 +2,7 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, token, Address, Bytes,
-    BytesN, Env, Map, String, Vec,
+    BytesN, Env, Map, String, Symbol, Vec,
 };
 
 /// Maximum length (bytes) for the optional payment reference string.
@@ -54,6 +54,8 @@ const TEMP_LIFETIME_THRESHOLD: u32 = 10_000;
 const TEMP_BUMP_AMOUNT: u32 = 15_000;
 
 const DEFAULT_MAX_BATCH_SIZE: u32 = 20;
+/// Maximum number of tags per payment (#122)
+const MAX_TAGS: u32 = 3;
 const MAX_SETTLEMENT_BATCH_SIZE: u32 = 50;
 const SETTLEMENT_FEE_BPS: i128 = 0;
 const DEFAULT_DISPUTE_TIMEOUT: u64 = 7 * 24 * 60 * 60; // 7 days in seconds
@@ -76,6 +78,25 @@ const IDEMPOTENCY_KEY_BUMP_AMOUNT: u32 = 17_280;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     RateLimitExceeded = 1,
+    SubscriptionPaused = 2,
+    OracleConditionNotMet = 3,
+}
+
+/// Direction for oracle price condition (#125)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OracleDirection {
+    Gte = 0,
+    Lte = 1,
+}
+
+/// Conditional release based on oracle price (#125)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleCondition {
+    pub asset: Address,
+    pub threshold: i128,
+    pub direction: OracleDirection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,6 +154,12 @@ pub struct Payment {
     pub split_recipients: Option<Vec<SplitRecipient>>,
     /// Optional execution timestamp for scheduled payments. 0 = immediate.
     pub execute_after: u64,
+    /// Optional payment category for on-chain segmentation (#122)
+    pub category: Option<Symbol>,
+    /// Optional tags (max 3) immutable after creation (#122)
+    pub tags: Option<Vec<Symbol>>,
+    /// Optional oracle price condition required for completion (#125)
+    pub release_condition: Option<OracleCondition>,
 }
 
 #[contracttype]
@@ -192,6 +219,10 @@ pub struct Subscription {
     pub max_charges: u32,
     pub charges_count: u32,
     pub active: bool,
+    /// True when subscriber has temporarily paused the subscription (#124)
+    pub paused: bool,
+    /// Ledger timestamp when the subscription was paused (#124)
+    pub paused_at: u64,
 }
 
 #[contracttype]
@@ -281,6 +312,8 @@ pub enum DataKey {
     MerchantVolumeBucket(Address, u32),
     /// Persistent: cached last tier bps emitted for merchant.
     MerchantCurrentTierBps(Address),
+    /// Persistent: (merchant, category) → Vec<payment_id> for category analytics (#122)
+    CategoryPayments(Address, Symbol),
     // --- Temporary ---
     Dispute(u32),
     /// Temporary: idempotency key → payment_id mapping (expires after 24h)
@@ -447,6 +480,9 @@ impl AhjoorPaymentsContract {
             metadata,
             split_recipients,
             execute_after: execute_after_ts,
+            category: None,
+            tags: None,
+            release_condition: None,
         };
 
         // Persistent: per-payment record with individual TTL
@@ -557,6 +593,9 @@ impl AhjoorPaymentsContract {
                 metadata: request.metadata.clone(),
                 split_recipients: None,
                 execute_after: 0,
+                category: None,
+                tags: None,
+                release_condition: None,
             };
 
             // Persistent: per-payment record with individual TTL
@@ -1036,6 +1075,9 @@ impl AhjoorPaymentsContract {
                 metadata: None,
                 split_recipients: None,
                 execute_after: 0,
+                category: None,
+                tags: None,
+                release_condition: None,
             };
 
             env.storage()
@@ -1149,6 +1191,9 @@ impl AhjoorPaymentsContract {
             metadata: None,
             split_recipients: None,
             execute_after: 0,
+            category: None,
+            tags: None,
+            release_condition: None,
         };
 
         env.storage()
@@ -1880,6 +1925,8 @@ impl AhjoorPaymentsContract {
             max_charges,
             charges_count: 0,
             active: true,
+            paused: false,
+            paused_at: 0,
         };
 
         env.storage()
@@ -1907,6 +1954,9 @@ impl AhjoorPaymentsContract {
 
         if !sub.active {
             panic!("Subscription is cancelled");
+        }
+        if sub.paused {
+            panic_with_error!(&env, Error::SubscriptionPaused);
         }
         if sub.max_charges > 0 && sub.charges_count >= sub.max_charges {
             panic!("Max charges reached");
@@ -1985,6 +2035,332 @@ impl AhjoorPaymentsContract {
             .persistent()
             .get(&DataKey::Subscription(subscription_id))
             .expect("Subscription not found")
+    }
+
+    // --- Subscription Pause / Resume (#124) ---
+
+    /// Subscriber temporarily pauses their subscription.
+    /// Charging is blocked while paused. Only the subscriber can pause.
+    pub fn pause_subscription(env: Env, subscriber: Address, sub_id: u32) {
+        Self::require_not_paused(&env);
+        subscriber.require_auth();
+
+        let mut sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(sub_id))
+            .expect("Subscription not found");
+
+        if sub.subscriber != subscriber {
+            panic!("Only the subscriber can pause");
+        }
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+        if sub.paused {
+            panic!("Subscription already paused");
+        }
+
+        let now = env.ledger().timestamp();
+        sub.paused = true;
+        sub.paused_at = now;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(sub_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(sub_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_subscription_paused(&env, sub_id, now);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Subscriber resumes a paused subscription.
+    /// The next charge interval restarts from the resume timestamp,
+    /// so paused time does not count toward the interval.
+    pub fn resume_subscription(env: Env, subscriber: Address, sub_id: u32) {
+        Self::require_not_paused(&env);
+        subscriber.require_auth();
+
+        let mut sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(sub_id))
+            .expect("Subscription not found");
+
+        if sub.subscriber != subscriber {
+            panic!("Only the subscriber can resume");
+        }
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+        if !sub.paused {
+            panic!("Subscription is not paused");
+        }
+
+        let now = env.ledger().timestamp();
+        sub.paused = false;
+        sub.paused_at = 0;
+        // Reset last_charged_at so the next interval starts from now,
+        // ensuring paused duration does not count.
+        sub.last_charged_at = now;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(sub_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(sub_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_subscription_resumed(&env, sub_id, now);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    // --- Payment Categories (#122) ---
+
+    /// Create a payment with optional category, tags, and release condition.
+    /// Category and tags enable on-chain segmentation and analytics.
+    /// release_condition, if set, must be satisfied at completion time (#125).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_payment_with_extras(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        category: Option<Symbol>,
+        tags: Option<Vec<Symbol>>,
+        release_condition: Option<OracleCondition>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        customer.require_auth();
+
+        if amount <= 0 {
+            panic!("Payment amount must be positive");
+        }
+        if let Some(ref t) = tags {
+            if t.len() > MAX_TAGS {
+                panic!("Tags list cannot exceed 3 items");
+            }
+        }
+
+        Self::require_merchant_approved(&env, &merchant);
+        Self::enforce_rate_limit(&env, &customer, 1);
+
+        let client = token::Client::new(&env, &token);
+        client.transfer(&customer, &env.current_contract_address(), &amount);
+
+        let timeout: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PaymentTimeout)
+            .unwrap_or(DEFAULT_PAYMENT_TIMEOUT);
+        let now = env.ledger().timestamp();
+
+        let payment_id = Self::next_payment_id(&env);
+        let payment = Payment {
+            id: payment_id,
+            customer: customer.clone(),
+            merchant: merchant.clone(),
+            amount,
+            token: token.clone(),
+            status: PaymentStatus::Pending,
+            created_at: now,
+            expires_at: now + timeout,
+            refunded_amount: 0,
+            reference: None,
+            metadata: None,
+            split_recipients: None,
+            execute_after: 0,
+            category: category.clone(),
+            tags: tags.clone(),
+            release_condition,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        Self::add_customer_payment(&env, &customer, payment_id);
+
+        // Index by category for analytics retrieval
+        if let Some(ref cat) = category {
+            let cat_key = DataKey::CategoryPayments(merchant.clone(), cat.clone());
+            let mut cat_ids: Vec<u32> = env
+                .storage()
+                .persistent()
+                .get(&cat_key)
+                .unwrap_or(Vec::new(&env));
+            cat_ids.push_back(payment_id);
+            env.storage().persistent().set(&cat_key, &cat_ids);
+            env.storage().persistent().extend_ttl(
+                &cat_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            events::emit_payment_categorized(
+                &env,
+                payment_id,
+                merchant.clone(),
+                cat.clone(),
+                tags.clone().unwrap_or(Vec::new(&env)),
+            );
+        }
+
+        Self::inc_global_created(&env);
+        Self::inc_merchant_created(&env, &merchant);
+        events::emit_payment_created(&env, payment_id, customer, merchant, amount, token);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        payment_id
+    }
+
+    /// Return payment IDs for a merchant + category pair, paginated.
+    /// page is 0-indexed. Empty result when page exceeds available data.
+    pub fn get_payments_by_category(
+        env: Env,
+        merchant: Address,
+        category: Symbol,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<u32> {
+        if page_size == 0 {
+            panic!("page_size must be positive");
+        }
+        let all: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CategoryPayments(merchant, category))
+            .unwrap_or(Vec::new(&env));
+        let total = all.len();
+        let start = page * page_size;
+        if start >= total {
+            return Vec::new(&env);
+        }
+        let end = (start + page_size).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(all.get(i).unwrap());
+        }
+        result
+    }
+
+    // --- Bulk Expire Payments (#123) ---
+
+    /// Expire a batch of payments atomically. Admin only.
+    /// Each payment must be Pending or Disputed and past its expiry timestamp.
+    /// If any payment is ineligible the entire batch reverts.
+    /// Batch size capped at MAX_SETTLEMENT_BATCH_SIZE (50).
+    pub fn bulk_expire_payments(env: Env, admin: Address, payment_ids: Vec<u32>) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can bulk expire payments");
+        }
+
+        let batch_size = payment_ids.len();
+        if batch_size == 0 {
+            panic!("Batch cannot be empty");
+        }
+        if batch_size > MAX_SETTLEMENT_BATCH_SIZE {
+            panic!("Batch size exceeds maximum allowed");
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Pass 1: validate all — any failure reverts the entire batch atomically
+        for payment_id in payment_ids.iter() {
+            let payment: Payment = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Payment(payment_id))
+                .expect("Payment not found");
+
+            if payment.status != PaymentStatus::Pending
+                && payment.status != PaymentStatus::Disputed
+            {
+                panic!("Payment is not in Pending or Disputed status");
+            }
+            if payment.expires_at == 0 || now < payment.expires_at {
+                panic!("Payment has not expired yet");
+            }
+        }
+
+        // Pass 2: process all refunds
+        let mut refund_total: i128 = 0;
+        for payment_id in payment_ids.iter() {
+            let mut payment: Payment = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Payment(payment_id))
+                .expect("Payment not found");
+
+            let refund_amount = payment.amount - payment.refunded_amount;
+            if refund_amount > 0 {
+                let client = token::Client::new(&env, &payment.token);
+                client.transfer(
+                    &env.current_contract_address(),
+                    &payment.customer,
+                    &refund_amount,
+                );
+                refund_total = refund_total
+                    .checked_add(refund_amount)
+                    .expect("Refund total overflow");
+            }
+
+            let old_status = payment.status;
+            payment.status = PaymentStatus::Expired;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Payment(payment_id), &payment);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Payment(payment_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+
+            Self::inc_global_expired(&env);
+            events::emit_payment_expired(
+                &env,
+                payment_id,
+                payment.customer.clone(),
+                refund_amount,
+                now,
+            );
+            events::emit_payment_status_changed(
+                &env,
+                payment_id,
+                old_status,
+                PaymentStatus::Expired,
+            );
+        }
+
+        events::emit_bulk_expire_completed(&env, batch_size, refund_total);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     pub fn pause_contract(env: Env, admin: Address, reason: String) {
@@ -2072,6 +2448,53 @@ impl AhjoorPaymentsContract {
 
         if payment.expires_at > 0 && env.ledger().timestamp() >= payment.expires_at {
             panic!("Payment has expired");
+        }
+
+        // Oracle price condition check (#125)
+        if let Some(ref condition) = payment.release_condition.clone() {
+            let oracle_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::OracleAddress)
+                .expect("Oracle not configured for conditional payment");
+            let usdc_token: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::UsdcToken)
+                .expect("Oracle not configured for conditional payment");
+            let max_oracle_age: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxOracleAge)
+                .expect("Oracle not configured for conditional payment");
+
+            let oracle_client = oracle::OracleClient::new(env, &oracle_addr);
+            let price_data: PriceData = oracle_client
+                .lastprice(&condition.asset, &usdc_token)
+                .expect("Oracle price unavailable");
+
+            let current_ts = env.ledger().timestamp();
+            let age = current_ts.saturating_sub(price_data.timestamp);
+            if age > max_oracle_age {
+                panic!("Oracle price is stale");
+            }
+
+            let met = match condition.direction {
+                OracleDirection::Gte => price_data.price >= condition.threshold,
+                OracleDirection::Lte => price_data.price <= condition.threshold,
+            };
+
+            events::emit_conditional_payment_attempt(
+                env,
+                payment_id,
+                price_data.price,
+                condition.threshold,
+                met,
+            );
+
+            if !met {
+                panic_with_error!(env, Error::OracleConditionNotMet);
+            }
         }
 
         let rolling_before = Self::rolling_merchant_volume(env, &payment.merchant);

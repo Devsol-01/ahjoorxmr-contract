@@ -11,6 +11,8 @@ const DEADLINE_EXTENSION_PROPOSAL_WINDOW: u64 = 24 * 60 * 60;
 const MAX_EVIDENCE_ENTRIES_PER_PARTY: u32 = 5;
 const DEFAULT_DISPUTE_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_BATCH_ESCROWS: u32 = 10;
+const DEFAULT_MAX_ORACLE_AGE_SECONDS: u64 = 300;
+const DEFAULT_INSURANCE_TRIGGER_DAYS: u64 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
@@ -22,6 +24,47 @@ pub enum EscrowStatus {
     Refunded = 4,
     PartiallyReleased = 5,
     PartiallyDisputed = 6,
+}
+
+const ORACLE_COMPARISON_LESS_OR_EQUAL: u32 = 0;
+const ORACLE_COMPARISON_GREATER_OR_EQUAL: u32 = 1;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseCondition {
+    pub base: Address,
+    pub quote: Address,
+    /// 0 = LessOrEqual, 1 = GreaterOrEqual
+    pub comparison: u32,
+    pub threshold_price: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowCreateRequest {
+    pub seller: Address,
+    pub arbiter: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub deadline: u64,
+    pub metadata_hash: Option<BytesN<32>>,
+    pub sellers: Vec<(Address, u32)>,
+    pub auto_renew: bool,
+    pub renewal_count: u32,
+    pub buyer_inactivity_secs: u64,
+    pub min_lock_until: Option<u64>,
+    pub release_base: Option<Address>,
+    pub release_quote: Option<Address>,
+    pub release_comparison: Option<u32>,
+    pub release_threshold_price: Option<i128>,
+    pub arbiter_fee_bps: Option<u32>,
 }
 
 #[contracttype]
@@ -38,12 +81,26 @@ pub struct Escrow {
     pub deadline: u64,
     pub metadata_hash: Option<BytesN<32>>,
     pub sellers: Vec<(Address, u32)>, // (address, bps) — multi-party sellers
+    pub extensions: EscrowExtensions,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowExtensions {
     pub auto_renew: bool,
     pub renewal_count: u32,
     pub renewals_remaining: u32,
     pub dispute_timeout_seconds: Option<u64>,
     /// Seconds of buyer inactivity before seller can claim auto-release; 0 = disabled (#150)
-    pub buyer_inactivity_release_seconds: u64,
+    pub buyer_inactivity_secs: u64,
+    /// Earliest ledger timestamp when release/partial release is permitted.
+    pub min_lock_until: Option<u64>,
+    pub release_base: Option<Address>,
+    pub release_quote: Option<Address>,
+    pub release_comparison: Option<u32>,
+    pub release_threshold_price: Option<i128>,
+    /// Optional per-escrow arbiter fee override in basis points.
+    pub arbiter_fee_bps: Option<u32>,
 }
 
 #[contracttype]
@@ -128,11 +185,31 @@ pub enum DataKey {
     Evidence(u32, Address),
     RenewalAllowance(u32),
     DefaultDisputeTimeout,
+    DefaultArbiterFeeBps,
+    OracleAddress,
+    MaxOracleAge,
+    InsurancePool,
+    InsuranceToken,
+    InsuranceTriggerDays,
+    InsuranceAdminConfirmed(u32),
+    InsuranceClaimed(u32),
     /// Last timestamp of any buyer action for inactivity tracking (#150)
     LastBuyerAction(u32),
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 200; // 2%
+const MAX_ARBITER_FEE_BPS: u32 = 1_000; // 10%
+
+mod oracle {
+    use crate::PriceData;
+    use soroban_sdk::{contractclient, Address, Env};
+
+    #[allow(dead_code)]
+    #[contractclient(name = "OracleClient")]
+    pub trait OracleInterface {
+        fn lastprice(env: Env, base: Address, quote: Address) -> Option<PriceData>;
+    }
+}
 
 mod events;
 
@@ -154,6 +231,14 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::DefaultDisputeTimeout, &DEFAULT_DISPUTE_TIMEOUT_SECONDS);
+        env.storage().instance().set(&DataKey::DefaultArbiterFeeBps, &0u32);
+        env.storage().instance().set(&DataKey::InsurancePool, &0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceTriggerDays, &DEFAULT_INSURANCE_TRIGGER_DAYS);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOracleAge, &DEFAULT_MAX_ORACLE_AGE_SECONDS);
 
         env.storage()
             .instance()
@@ -174,14 +259,11 @@ impl AhjoorEscrowContract {
         sellers: Vec<(Address, u32)>,
         auto_renew: bool,
         renewal_count: u32,
-        buyer_inactivity_release_seconds: u64,
     ) -> u32 {
         Self::require_not_paused(&env);
         buyer.require_auth();
 
-        Self::create_escrow_core(
-            &env,
-            &buyer,
+        let request = EscrowCreateRequest {
             seller,
             arbiter,
             amount,
@@ -191,8 +273,65 @@ impl AhjoorEscrowContract {
             sellers,
             auto_renew,
             renewal_count,
-            buyer_inactivity_release_seconds,
-        )
+            buyer_inactivity_secs: 0,
+            min_lock_until: None,
+            release_base: None,
+            release_quote: None,
+            release_comparison: None,
+            release_threshold_price: None,
+            arbiter_fee_bps: None,
+        };
+
+        Self::create_escrow_core(&env, &buyer, request)
+    }
+
+    /// Create a new escrow with explicit inactivity release configuration.
+    pub fn create_escrow_with_inactivity(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        amount: i128,
+        token: Address,
+        deadline: u64,
+        metadata_hash: Option<BytesN<32>>,
+        sellers: Vec<(Address, u32)>,
+        renewal_count: u32,
+        buyer_inactivity_secs: u64,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        let auto_renew = renewal_count > 0;
+
+        let request = EscrowCreateRequest {
+            seller,
+            arbiter,
+            amount,
+            token,
+            deadline,
+            metadata_hash,
+            sellers,
+            auto_renew,
+            renewal_count,
+            buyer_inactivity_secs,
+            min_lock_until: None,
+            release_base: None,
+            release_quote: None,
+            release_comparison: None,
+            release_threshold_price: None,
+            arbiter_fee_bps: None,
+        };
+
+        Self::create_escrow_core(&env, &buyer, request)
+    }
+
+    /// Create a new escrow with optional lock, oracle condition, and per-escrow arbiter fee.
+    pub fn create_escrow_v2(env: Env, buyer: Address, request: EscrowCreateRequest) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        Self::create_escrow_core(&env, &buyer, request)
     }
 
     /// Create up to 10 escrows in one atomic transaction.
@@ -221,16 +360,24 @@ impl AhjoorEscrowContract {
             let escrow_id = Self::create_escrow_core(
                 &env,
                 &buyer,
-                cfg.seller,
-                cfg.arbiter,
-                cfg.amount,
-                cfg.token,
-                cfg.deadline,
-                cfg.metadata_hash,
-                cfg.sellers,
-                cfg.auto_renew,
-                cfg.renewal_count,
-                0, // buyer_inactivity_release_seconds not supported in batch config
+                EscrowCreateRequest {
+                    seller: cfg.seller,
+                    arbiter: cfg.arbiter,
+                    amount: cfg.amount,
+                    token: cfg.token,
+                    deadline: cfg.deadline,
+                    metadata_hash: cfg.metadata_hash,
+                    sellers: cfg.sellers,
+                    auto_renew: cfg.auto_renew,
+                    renewal_count: cfg.renewal_count,
+                    buyer_inactivity_secs: 0,
+                    min_lock_until: None,
+                    release_base: None,
+                    release_quote: None,
+                    release_comparison: None,
+                    release_threshold_price: None,
+                    arbiter_fee_bps: None,
+                },
             );
 
             if first_id.is_none() {
@@ -250,26 +397,70 @@ impl AhjoorEscrowContract {
         created_ids
     }
 
-    fn create_escrow_core(
-        env: &Env,
-        buyer: &Address,
-        seller: Address,
-        arbiter: Address,
-        amount: i128,
-        token: Address,
-        deadline: u64,
-        metadata_hash: Option<BytesN<32>>,
-        sellers: Vec<(Address, u32)>,
-        auto_renew: bool,
-        renewal_count: u32,
-        buyer_inactivity_release_seconds: u64,
-    ) -> u32 {
+    fn create_escrow_core(env: &Env, buyer: &Address, request: EscrowCreateRequest) -> u32 {
+        let EscrowCreateRequest {
+            seller,
+            arbiter,
+            amount,
+            token,
+            deadline,
+            metadata_hash,
+            sellers,
+            auto_renew,
+            renewal_count,
+            buyer_inactivity_secs,
+            min_lock_until,
+            release_base,
+            release_quote,
+            release_comparison,
+            release_threshold_price,
+            arbiter_fee_bps,
+        } = request;
+
         if amount <= 0 {
             panic!("Escrow amount must be positive");
         }
 
         if deadline <= env.ledger().timestamp() {
             panic!("Deadline must be in the future");
+        }
+
+        if let Some(lock_until) = min_lock_until {
+            if deadline <= lock_until {
+                panic!("Deadline must be after min_lock_until");
+            }
+        }
+
+        if let Some(fee_bps) = arbiter_fee_bps {
+            if fee_bps > MAX_ARBITER_FEE_BPS {
+                panic!("Arbiter fee exceeds maximum of 1000 bps");
+            }
+        }
+
+        let has_any_release_condition = release_base.is_some()
+            || release_quote.is_some()
+            || release_comparison.is_some()
+            || release_threshold_price.is_some();
+        let has_full_release_condition = release_base.is_some()
+            && release_quote.is_some()
+            && release_comparison.is_some()
+            && release_threshold_price.is_some();
+        if has_any_release_condition && !has_full_release_condition {
+            panic!("Incomplete release condition");
+        }
+
+        if let Some(threshold) = release_threshold_price {
+            if threshold <= 0 {
+                panic!("Release condition threshold must be positive");
+            }
+        }
+
+        if let Some(comparison) = release_comparison {
+            if comparison != ORACLE_COMPARISON_LESS_OR_EQUAL
+                && comparison != ORACLE_COMPARISON_GREATER_OR_EQUAL
+            {
+                panic!("Invalid release comparison");
+            }
         }
 
         let is_allowed = env
@@ -329,15 +520,19 @@ impl AhjoorEscrowContract {
             deadline,
             metadata_hash: metadata_hash.clone(),
             sellers: resolved_sellers.clone(),
-            auto_renew,
-            renewal_count,
-            renewals_remaining: if renewal_count == 0 {
-                0
-            } else {
-                renewal_count
+            extensions: EscrowExtensions {
+                auto_renew,
+                renewal_count,
+                renewals_remaining: if renewal_count == 0 { 0 } else { renewal_count },
+                dispute_timeout_seconds: None,
+                buyer_inactivity_secs,
+                min_lock_until,
+                release_base,
+                release_quote,
+                release_comparison,
+                release_threshold_price,
+                arbiter_fee_bps,
             },
-            dispute_timeout_seconds: None,
-            buyer_inactivity_release_seconds,
         };
 
         env.storage()
@@ -350,7 +545,7 @@ impl AhjoorEscrowContract {
         );
 
         // #150: Initialize LastBuyerAction to creation timestamp
-        if buyer_inactivity_release_seconds > 0 {
+        if buyer_inactivity_secs > 0 {
             env.storage()
                 .persistent()
                 .set(&DataKey::LastBuyerAction(escrow_id), &now);
@@ -388,6 +583,10 @@ impl AhjoorEscrowContract {
         // Emit multi-party event if more than one seller
         if resolved_sellers.len() > 1 {
             events::emit_multi_party_escrow_created(env, escrow_id, resolved_sellers.len());
+        }
+
+        if let Some(lock_until) = escrow.extensions.min_lock_until {
+            events::emit_escrow_time_locked(env, escrow_id, lock_until);
         }
 
         env.storage()
@@ -430,7 +629,6 @@ impl AhjoorEscrowContract {
             sellers,
             auto_renew,
             renewal_count,
-            0, // buyer_inactivity_release_seconds; use create_escrow directly if needed
         );
 
         let mut escrow: Escrow = env
@@ -438,7 +636,7 @@ impl AhjoorEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found");
-        escrow.dispute_timeout_seconds = Some(dispute_timeout_seconds);
+        escrow.extensions.dispute_timeout_seconds = Some(dispute_timeout_seconds);
 
         env.storage()
             .persistent()
@@ -473,41 +671,16 @@ impl AhjoorEscrowContract {
             panic!("Only buyer or arbiter can release escrow");
         }
 
+        Self::require_unlocked(&env, &escrow);
+
         // #150: Track buyer activity
         if caller == escrow.buyer {
             Self::update_last_buyer_action(&env, &escrow);
         }
 
-        let client = token::Client::new(&env, &escrow.token);
         let total = escrow.amount;
 
-        if escrow.sellers.len() <= 1 {
-            // Single-seller path
-            client.transfer(
-                &env.current_contract_address(),
-                &escrow.seller,
-                &total,
-            );
-            events::emit_escrow_released(&env, escrow_id, escrow.seller.clone(), total);
-        } else {
-            // Multi-party: distribute proportionally, dust goes to first seller
-            let mut distributed: i128 = 0;
-            for i in 1..escrow.sellers.len() {
-                let (addr, bps) = escrow.sellers.get(i).unwrap();
-                let share = (total * bps as i128) / 10_000;
-                if share > 0 {
-                    client.transfer(&env.current_contract_address(), &addr, &share);
-                }
-                distributed += share;
-            }
-            // First seller gets remainder (handles rounding dust)
-            let first_share = total - distributed;
-            if first_share > 0 {
-                let (first_addr, _) = escrow.sellers.get(0).unwrap();
-                client.transfer(&env.current_contract_address(), &first_addr, &first_share);
-            }
-            events::emit_multi_party_escrow_released(&env, escrow_id, total);
-        }
+        Self::transfer_to_sellers(&env, &escrow, total, escrow_id);
 
         escrow.status = EscrowStatus::Released;
 
@@ -628,7 +801,7 @@ impl AhjoorEscrowContract {
             panic!("Only buyer can set renewal allowance");
         }
 
-        if !escrow.auto_renew {
+        if !escrow.extensions.auto_renew {
             panic!("Auto-renew is not enabled for this escrow");
         }
 
@@ -667,8 +840,8 @@ impl AhjoorEscrowContract {
             panic!("Only buyer can cancel auto-renew");
         }
 
-        escrow.auto_renew = false;
-        escrow.renewals_remaining = 0;
+        escrow.extensions.auto_renew = false;
+        escrow.extensions.renewals_remaining = 0;
 
         env.storage()
             .persistent()
@@ -694,6 +867,8 @@ impl AhjoorEscrowContract {
         if caller != escrow.buyer && caller != escrow.arbiter {
             panic!("Only buyer or arbiter can release escrow");
         }
+
+        Self::require_unlocked(&env, &escrow);
 
         if release_amount <= 0 {
             panic!("Release amount must be positive");
@@ -803,7 +978,7 @@ impl AhjoorEscrowContract {
             created_at: env.ledger().timestamp(),
             resolved: false,
             dispute_amount,
-            timeout_seconds: escrow.dispute_timeout_seconds,
+            timeout_seconds: escrow.extensions.dispute_timeout_seconds,
         };
         env.storage()
             .persistent()
@@ -848,6 +1023,14 @@ impl AhjoorEscrowContract {
 
         let client = token::Client::new(&env, &escrow.token);
 
+        let arbiter_fee_bps = Self::effective_arbiter_fee_bps(&env, &escrow);
+        let arbiter_fee = (escrow.amount * arbiter_fee_bps as i128) / 10_000;
+
+        if arbiter_fee > 0 {
+            client.transfer(&env.current_contract_address(), &arbiter, &arbiter_fee);
+            events::emit_arbiter_fee_paid(&env, escrow_id, arbiter.clone(), arbiter_fee);
+        }
+
         // Compute and deduct protocol fee
         let fee_bps: u32 = env
             .storage()
@@ -870,7 +1053,11 @@ impl AhjoorEscrowContract {
             events::emit_protocol_fee_paid(&env, escrow_id, protocol_fee, fee_recipient);
         }
 
-        let winner_amount = escrow.amount - protocol_fee;
+        let winner_amount = escrow.amount - protocol_fee - arbiter_fee;
+
+        if winner_amount < 0 {
+            panic!("Fee configuration exceeds escrow amount");
+        }
 
         if release_to_seller {
             client.transfer(
@@ -977,6 +1164,246 @@ impl AhjoorEscrowContract {
             .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_SECONDS)
     }
 
+    /// Set the protocol-wide default arbiter fee (bps). Admin only.
+    /// Fee cap is 1000 bps (10%).
+    pub fn set_default_arbiter_fee_bps(env: Env, admin: Address, fee_bps: u32) {
+        Self::require_admin(&env, &admin);
+        if fee_bps > MAX_ARBITER_FEE_BPS {
+            panic!("Arbiter fee exceeds maximum of 1000 bps");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultArbiterFeeBps, &fee_bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_default_arbiter_fee_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultArbiterFeeBps)
+            .unwrap_or(0)
+    }
+
+    /// Configure oracle address and max accepted price age (seconds). Admin only.
+    pub fn set_oracle(env: Env, admin: Address, oracle: Address, max_oracle_age: u64) {
+        Self::require_admin(&env, &admin);
+        if max_oracle_age == 0 {
+            panic!("max_oracle_age must be positive");
+        }
+
+        env.storage().instance().set(&DataKey::OracleAddress, &oracle);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxOracleAge, &max_oracle_age);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_oracle_address(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleAddress)
+            .expect("Oracle not configured")
+    }
+
+    pub fn get_max_oracle_age(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxOracleAge)
+            .unwrap_or(DEFAULT_MAX_ORACLE_AGE_SECONDS)
+    }
+
+    /// Configure insurance token and trigger window in days. Admin only.
+    pub fn set_insurance_config(env: Env, admin: Address, token: Address, trigger_days: u64) {
+        Self::require_admin(&env, &admin);
+        if trigger_days == 0 {
+            panic!("insurance_trigger_days must be positive");
+        }
+
+        let is_allowed = env
+            .storage()
+            .instance()
+            .get(&DataKey::AllowedToken(token.clone()))
+            .unwrap_or(false);
+        if !is_allowed {
+            panic!("TokenNotAllowed");
+        }
+
+        env.storage().instance().set(&DataKey::InsuranceToken, &token);
+        env.storage()
+            .instance()
+            .set(&DataKey::InsuranceTriggerDays, &trigger_days);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_insurance_pool(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InsurancePool)
+            .unwrap_or(0)
+    }
+
+    /// Open contribution flow for the insurance pool.
+    pub fn contribute_to_insurance(env: Env, contributor: Address, amount: i128) {
+        Self::require_not_paused(&env);
+        contributor.require_auth();
+
+        if amount <= 0 {
+            panic!("Insurance contribution must be positive");
+        }
+
+        let token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceToken)
+            .expect("Insurance token not configured");
+
+        let client = token::Client::new(&env, &token);
+        client.transfer(&contributor, &env.current_contract_address(), &amount);
+
+        let current_pool: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsurancePool)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::InsurancePool, &(current_pool + amount));
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin confirms or clears inactivity confirmation for a disputed escrow.
+    pub fn confirm_insurance_inactivity(
+        env: Env,
+        admin: Address,
+        escrow_id: u32,
+        confirmed: bool,
+    ) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::InsuranceAdminConfirmed(escrow_id), &confirmed);
+        env.storage().persistent().extend_ttl(
+            &DataKey::InsuranceAdminConfirmed(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Claim insurance for unresolved disputes after admin-confirmed inactivity.
+    /// The claim amount is capped at 50% of the disputed amount and pool balance.
+    pub fn claim_insurance(env: Env, claimant: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        claimant.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if claimant != escrow.buyer && claimant != escrow.seller {
+            panic!("Only buyer or seller can claim insurance");
+        }
+
+        if escrow.status != EscrowStatus::Disputed
+            && escrow.status != EscrowStatus::PartiallyDisputed
+        {
+            panic!("Escrow is not disputed");
+        }
+
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(escrow_id))
+            .expect("Dispute not found");
+        if dispute.resolved {
+            panic!("Dispute already resolved");
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, bool>(&DataKey::InsuranceClaimed(escrow_id))
+            .unwrap_or(false)
+        {
+            panic!("Insurance already claimed");
+        }
+
+        let confirmed: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InsuranceAdminConfirmed(escrow_id))
+            .unwrap_or(false);
+        if !confirmed {
+            panic!("Admin confirmation required");
+        }
+
+        let trigger_days: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceTriggerDays)
+            .unwrap_or(DEFAULT_INSURANCE_TRIGGER_DAYS);
+        let trigger_seconds = trigger_days.saturating_mul(24 * 60 * 60);
+        let elapsed = env.ledger().timestamp().saturating_sub(dispute.created_at);
+        if elapsed < trigger_seconds {
+            panic!("Insurance trigger period not reached");
+        }
+
+        let insurance_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsuranceToken)
+            .expect("Insurance token not configured");
+        if insurance_token != escrow.token {
+            panic!("Escrow token not covered by insurance pool");
+        }
+
+        let max_claim = escrow.amount / 2;
+        let pool_balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::InsurancePool)
+            .unwrap_or(0);
+        let claim_amount = if pool_balance < max_claim {
+            pool_balance
+        } else {
+            max_claim
+        };
+
+        if claim_amount <= 0 {
+            panic!("Insurance pool has insufficient balance");
+        }
+
+        let token_client = token::Client::new(&env, &insurance_token);
+        token_client.transfer(&env.current_contract_address(), &claimant, &claim_amount);
+
+        env.storage()
+            .instance()
+            .set(&DataKey::InsurancePool, &(pool_balance - claim_amount));
+        env.storage()
+            .persistent()
+            .set(&DataKey::InsuranceClaimed(escrow_id), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::InsuranceClaimed(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_insurance_claimed(&env, escrow_id, claimant, claim_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Set protocol fee in basis points and fee recipient. Admin only.
     /// Max fee is 200 bps (2%).
     pub fn update_protocol_fee(env: Env, admin: Address, fee_bps: u32, fee_recipient: Address) {
@@ -1006,6 +1433,76 @@ impl AhjoorEscrowContract {
         (fee_bps, fee_recipient)
     }
 
+    /// Anyone may trigger release when the escrow's oracle condition is met.
+    pub fn check_and_release_escrow(env: Env, escrow_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if !Self::is_open_escrow_status(escrow.status) {
+            panic!("Escrow is not active");
+        }
+
+        let base = escrow
+            .extensions
+            .release_base
+            .clone()
+            .expect("No release condition set");
+        let quote = escrow
+            .extensions
+            .release_quote
+            .clone()
+            .expect("No release condition set");
+        let comparison = escrow
+            .extensions
+            .release_comparison
+            .expect("No release condition set");
+        let threshold_price = escrow
+            .extensions
+            .release_threshold_price
+            .expect("No release condition set");
+
+        let price_data = Self::get_oracle_price(&env, &base, &quote);
+        let condition_met = match comparison {
+            ORACLE_COMPARISON_LESS_OR_EQUAL => price_data.price <= threshold_price,
+            ORACLE_COMPARISON_GREATER_OR_EQUAL => price_data.price >= threshold_price,
+            _ => panic!("Invalid release comparison"),
+        };
+
+        if !condition_met {
+            panic!("Release condition not met");
+        }
+
+        Self::transfer_to_sellers(&env, &escrow, escrow.amount, escrow_id);
+        escrow.status = EscrowStatus::Released;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_oracle_release_triggered(
+            &env,
+            escrow_id,
+            price_data.price,
+            base,
+            quote,
+            comparison,
+            threshold_price,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Auto-release expired escrow (past deadline, undisputed). Can be called by buyer.
     pub fn auto_release_expired(env: Env, escrow_id: u32) {
         Self::require_not_paused(&env);
@@ -1022,6 +1519,8 @@ impl AhjoorEscrowContract {
         if env.ledger().timestamp() <= escrow.deadline {
             panic!("Escrow has not expired yet");
         }
+
+        Self::require_unlocked(&env, &escrow);
 
         escrow.buyer.require_auth();
 
@@ -1533,11 +2032,19 @@ impl AhjoorEscrowContract {
             deadline,
             metadata_hash: None,
             sellers: single_seller,
-            auto_renew: false,
-            renewal_count: 0,
-            renewals_remaining: 0,
-            dispute_timeout_seconds: None,
-            buyer_inactivity_release_seconds: 0,
+            extensions: EscrowExtensions {
+                auto_renew: false,
+                renewal_count: 0,
+                renewals_remaining: 0,
+                dispute_timeout_seconds: None,
+                buyer_inactivity_secs: 0,
+                min_lock_until: None,
+                release_base: None,
+                release_quote: None,
+                release_comparison: None,
+                release_threshold_price: None,
+                arbiter_fee_bps: None,
+            },
         };
 
         env.storage()
@@ -1712,11 +2219,19 @@ impl AhjoorEscrowContract {
             deadline,
             metadata_hash: None,
             sellers: single_seller,
-            auto_renew: false,
-            renewal_count: 0,
-            renewals_remaining: 0,
-            dispute_timeout_seconds: None,
-            buyer_inactivity_release_seconds: 0,
+            extensions: EscrowExtensions {
+                auto_renew: false,
+                renewal_count: 0,
+                renewals_remaining: 0,
+                dispute_timeout_seconds: None,
+                buyer_inactivity_secs: 0,
+                min_lock_until: None,
+                release_base: None,
+                release_quote: None,
+                release_comparison: None,
+                release_threshold_price: None,
+                arbiter_fee_bps: None,
+            },
         };
 
         env.storage()
@@ -1833,7 +2348,7 @@ impl AhjoorEscrowContract {
     // -------------------------------------------------------------------------
 
     /// Claim an inactivity-based release to seller.
-    /// Callable only by the escrow's seller after `buyer_inactivity_release_seconds`
+    /// Callable only by the escrow's seller after `buyer_inactivity_secs`
     /// have elapsed without any buyer action. Disabled when the field is 0.
     pub fn claim_inactivity_release(env: Env, seller: Address, escrow_id: u32) {
         Self::require_not_paused(&env);
@@ -1845,7 +2360,7 @@ impl AhjoorEscrowContract {
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found");
 
-        if escrow.buyer_inactivity_release_seconds == 0 {
+        if escrow.extensions.buyer_inactivity_secs == 0 {
             panic!("Inactivity release is not enabled for this escrow");
         }
 
@@ -1866,7 +2381,7 @@ impl AhjoorEscrowContract {
         let now = env.ledger().timestamp();
         let inactivity_seconds = now.saturating_sub(last_action);
 
-        if inactivity_seconds < escrow.buyer_inactivity_release_seconds {
+        if inactivity_seconds < escrow.extensions.buyer_inactivity_secs {
             panic!("Buyer inactivity window has not elapsed");
         }
 
@@ -1935,6 +2450,77 @@ impl AhjoorEscrowContract {
         }
     }
 
+    fn require_unlocked(env: &Env, escrow: &Escrow) {
+        if let Some(lock_until) = escrow.extensions.min_lock_until {
+            if env.ledger().timestamp() < lock_until {
+                panic!("EscrowStillLocked");
+            }
+        }
+    }
+
+    fn transfer_to_sellers(env: &Env, escrow: &Escrow, total: i128, escrow_id: u32) {
+        let client = token::Client::new(env, &escrow.token);
+        if escrow.sellers.len() <= 1 {
+            client.transfer(&env.current_contract_address(), &escrow.seller, &total);
+            events::emit_escrow_released(env, escrow_id, escrow.seller.clone(), total);
+            return;
+        }
+
+        let mut distributed: i128 = 0;
+        for i in 1..escrow.sellers.len() {
+            let (addr, bps) = escrow.sellers.get(i).unwrap();
+            let share = (total * bps as i128) / 10_000;
+            if share > 0 {
+                client.transfer(&env.current_contract_address(), &addr, &share);
+            }
+            distributed += share;
+        }
+
+        let first_share = total - distributed;
+        if first_share > 0 {
+            let (first_addr, _) = escrow.sellers.get(0).unwrap();
+            client.transfer(&env.current_contract_address(), &first_addr, &first_share);
+        }
+        events::emit_multi_party_escrow_released(env, escrow_id, total);
+    }
+
+    fn get_oracle_price(env: &Env, base: &Address, quote: &Address) -> PriceData {
+        let oracle_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleAddress)
+            .expect("Oracle not configured");
+        let max_oracle_age: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxOracleAge)
+            .unwrap_or(DEFAULT_MAX_ORACLE_AGE_SECONDS);
+
+        let oracle_client = oracle::OracleClient::new(env, &oracle_addr);
+        let price_data = oracle_client
+            .lastprice(base, quote)
+            .expect("Oracle price unavailable");
+
+        let age = env.ledger().timestamp().saturating_sub(price_data.timestamp);
+        if age > max_oracle_age {
+            panic!("Oracle price is stale");
+        }
+        if price_data.price <= 0 {
+            panic!("Invalid oracle price");
+        }
+
+        price_data
+    }
+
+    fn effective_arbiter_fee_bps(env: &Env, escrow: &Escrow) -> u32 {
+        escrow.extensions.arbiter_fee_bps.unwrap_or(
+            env.storage()
+                .instance()
+                .get(&DataKey::DefaultArbiterFeeBps)
+                .unwrap_or(0),
+        )
+    }
+
     fn is_open_escrow_status(status: EscrowStatus) -> bool {
         matches!(
             status,
@@ -1964,11 +2550,11 @@ impl AhjoorEscrowContract {
     }
 
     fn try_auto_renew(env: &Env, old_escrow_id: u32, source: &Escrow) {
-        if !source.auto_renew {
+        if !source.extensions.auto_renew {
             return;
         }
 
-        if source.renewal_count != 0 && source.renewals_remaining == 0 {
+        if source.extensions.renewal_count != 0 && source.extensions.renewals_remaining == 0 {
             return;
         }
 
@@ -1996,10 +2582,10 @@ impl AhjoorEscrowContract {
 
         let new_escrow_id = Self::next_escrow_id(env);
         let now = env.ledger().timestamp();
-        let renewals_remaining = if source.renewal_count == 0 {
+        let renewals_remaining = if source.extensions.renewal_count == 0 {
             0
         } else {
-            source.renewals_remaining - 1
+            source.extensions.renewals_remaining - 1
         };
 
         let renewed = Escrow {
@@ -2014,15 +2600,23 @@ impl AhjoorEscrowContract {
             deadline: now + duration,
             metadata_hash: source.metadata_hash.clone(),
             sellers: source.sellers.clone(),
-            auto_renew: source.auto_renew,
-            renewal_count: source.renewal_count,
-            renewals_remaining,
-            dispute_timeout_seconds: source.dispute_timeout_seconds,
-            buyer_inactivity_release_seconds: source.buyer_inactivity_release_seconds,
+            extensions: EscrowExtensions {
+                auto_renew: source.extensions.auto_renew,
+                renewal_count: source.extensions.renewal_count,
+                renewals_remaining,
+                dispute_timeout_seconds: source.extensions.dispute_timeout_seconds,
+                buyer_inactivity_secs: source.extensions.buyer_inactivity_secs,
+                min_lock_until: source.extensions.min_lock_until,
+                release_base: source.extensions.release_base.clone(),
+                release_quote: source.extensions.release_quote.clone(),
+                release_comparison: source.extensions.release_comparison,
+                release_threshold_price: source.extensions.release_threshold_price,
+                arbiter_fee_bps: source.extensions.arbiter_fee_bps,
+            },
         };
 
         // #150: Initialize LastBuyerAction for renewed escrow
-        if source.buyer_inactivity_release_seconds > 0 {
+        if source.extensions.buyer_inactivity_secs > 0 {
             env.storage()
                 .persistent()
                 .set(&DataKey::LastBuyerAction(new_escrow_id), &now);
@@ -2058,7 +2652,7 @@ impl AhjoorEscrowContract {
     /// Update the LastBuyerAction timestamp for inactivity tracking (#150).
     /// Only records when inactivity release is enabled for the escrow.
     fn update_last_buyer_action(env: &Env, escrow: &Escrow) {
-        if escrow.buyer_inactivity_release_seconds == 0 {
+        if escrow.extensions.buyer_inactivity_secs == 0 {
             return;
         }
         let now = env.ledger().timestamp();

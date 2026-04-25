@@ -13,6 +13,14 @@ pub struct EscrowCreated {
     pub deadline: u64,
 }
 
+/// Event: Escrow creation includes a lock window
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowTimeLocked {
+    pub escrow_id: u32,
+    pub locked_until: u64,
+}
+
 /// Event: Batch escrow created summary
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -82,6 +90,36 @@ pub struct EscrowProtocolFeePaid {
     pub escrow_id: u32,
     pub fee_amount: i128,
     pub fee_recipient: Address,
+}
+
+/// Event: Arbiter fee paid on dispute resolution
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ArbiterFeePaid {
+    pub escrow_id: u32,
+    pub arbiter: Address,
+    pub fee_amount: i128,
+}
+
+/// Event: Insurance payout claimed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InsuranceClaimed {
+    pub escrow_id: u32,
+    pub claimant: Address,
+    pub amount: i128,
+}
+
+/// Event: Oracle-triggered release executed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct OracleReleaseTriggered {
+    pub escrow_id: u32,
+    pub oracle_price: i128,
+    pub base: Address,
+    pub quote: Address,
+    pub comparison: u32,
+    pub threshold_price: i128,
 }
 
 /// Event: Escrow refunded to buyer
@@ -221,6 +259,14 @@ pub fn emit_escrow_created(
     .publish(e);
 }
 
+pub fn emit_escrow_time_locked(e: &Env, escrow_id: u32, locked_until: u64) {
+    EscrowTimeLocked {
+        escrow_id,
+        locked_until,
+    }
+    .publish(e);
+}
+
 pub fn emit_batch_escrow_created(e: &Env, count: u32, first_id: u32, last_id: u32) {
     BatchEscrowCreated {
         count,
@@ -303,6 +349,44 @@ pub fn emit_protocol_fee_paid(e: &Env, escrow_id: u32, fee_amount: i128, fee_rec
         escrow_id,
         fee_amount,
         fee_recipient,
+    }
+    .publish(e);
+}
+
+pub fn emit_arbiter_fee_paid(e: &Env, escrow_id: u32, arbiter: Address, fee_amount: i128) {
+    ArbiterFeePaid {
+        escrow_id,
+        arbiter,
+        fee_amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_insurance_claimed(e: &Env, escrow_id: u32, claimant: Address, amount: i128) {
+    InsuranceClaimed {
+        escrow_id,
+        claimant,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_oracle_release_triggered(
+    e: &Env,
+    escrow_id: u32,
+    oracle_price: i128,
+    base: Address,
+    quote: Address,
+    comparison: u32,
+    threshold_price: i128,
+) {
+    OracleReleaseTriggered {
+        escrow_id,
+        oracle_price,
+        base,
+        quote,
+        comparison,
+        threshold_price,
     }
     .publish(e);
 }

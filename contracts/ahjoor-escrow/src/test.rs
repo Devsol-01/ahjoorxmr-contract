@@ -2144,7 +2144,7 @@ fn test_auto_renew_creates_next_escrow_on_release() {
     let renewed = s.client.get_escrow(&next_id);
     assert_eq!(renewed.status, EscrowStatus::Active);
     assert_eq!(renewed.amount, 500);
-    assert_eq!(renewed.renewals_remaining, 1);
+    assert_eq!(renewed.extensions.renewals_remaining, 1);
 }
 
 #[test]
@@ -2374,6 +2374,7 @@ fn test_transfer_buyer_role_new_buyer_inherits_rights_old_buyer_loses_them() {
     s.client.release_escrow(&new_buyer, &escrow_id);
     let escrow = s.client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Released);
+}
 
 fn make_batch_config(
     env: &Env,
@@ -2570,3 +2571,1083 @@ fn test_create_escrows_batch_single_item() {
     assert_eq!(last_id, 0);
 }
 
+
+
+// ===========================================================================
+//  Issue #137: Insurance Pool Tests
+// ===========================================================================
+
+fn setup_insurance<'a>(s: &'a TestSetup<'a>) {
+    s.client.set_insurance_config(&s.admin, &s.token_addr, &7u64);
+}
+
+#[test]
+fn test_insurance_contribute_and_pool_balance() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &1000);
+
+    s.client.contribute_to_insurance(&contributor, &500);
+    assert_eq!(s.client.get_insurance_pool(), 500);
+
+    s.client.contribute_to_insurance(&contributor, &300);
+    assert_eq!(s.client.get_insurance_pool(), 800);
+}
+
+#[test]
+fn test_insurance_claim_after_trigger_period() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &10_000);
+    s.client.contribute_to_insurance(&contributor, &10_000);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &1000);
+
+    // Advance past 7-day trigger (7 * 24 * 60 * 60 = 604800 seconds)
+    s.env.ledger().set_timestamp(1000 + 604_801);
+
+    s.client.confirm_insurance_inactivity(&s.admin, &escrow_id, &true);
+    s.client.claim_insurance(&buyer, &escrow_id);
+
+    // Claim is capped at 50% of escrow amount = 500
+    assert_eq!(s.token_client.balance(&buyer), 500);
+    assert_eq!(s.client.get_insurance_pool(), 9_500);
+}
+
+#[test]
+fn test_insurance_claim_capped_at_50_percent() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &10_000);
+    s.client.contribute_to_insurance(&contributor, &10_000);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &2000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &2000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &2000);
+    s.env.ledger().set_timestamp(1000 + 604_801);
+    s.client.confirm_insurance_inactivity(&s.admin, &escrow_id, &true);
+    s.client.claim_insurance(&buyer, &escrow_id);
+
+    // 50% of 2000 = 1000
+    assert_eq!(s.token_client.balance(&buyer), 1000);
+}
+
+#[test]
+fn test_insurance_claim_before_trigger_period_panics() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &10_000);
+    s.client.contribute_to_insurance(&contributor, &10_000);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &1000);
+    // Only 1 day elapsed, not 7
+    s.env.ledger().set_timestamp(1000 + 86_400);
+    s.client.confirm_insurance_inactivity(&s.admin, &escrow_id, &true);
+
+    let result = s.client.try_claim_insurance(&buyer, &escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_insurance_claim_requires_admin_confirmation() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &10_000);
+    s.client.contribute_to_insurance(&contributor, &10_000);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &1000);
+    s.env.ledger().set_timestamp(1000 + 604_801);
+    // No admin confirmation
+
+    let result = s.client.try_claim_insurance(&buyer, &escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_insurance_claim_emits_event() {
+    let s = setup();
+    setup_insurance(&s);
+
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &10_000);
+    s.client.contribute_to_insurance(&contributor, &10_000);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &1000);
+    s.env.ledger().set_timestamp(1000 + 604_801);
+    s.client.confirm_insurance_inactivity(&s.admin, &escrow_id, &true);
+    s.client.claim_insurance(&buyer, &escrow_id);
+
+    let events = s.env.events().all();
+    let topic = (Symbol::new(&s.env, "insurance_claimed"),).into_val(&s.env);
+    let found = events.iter().any(|e| e.1 == topic);
+    assert!(found, "Expected insurance_claimed event");
+}
+
+#[test]
+fn test_insurance_pool_capped_by_pool_balance() {
+    let s = setup();
+    setup_insurance(&s);
+
+    // Pool only has 100, escrow is 1000 → claim = min(500, 100) = 100
+    let contributor = Address::generate(&s.env);
+    s.token_admin_client.mint(&contributor, &100);
+    s.client.contribute_to_insurance(&contributor, &100);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let deadline = s.env.ledger().timestamp() + 10_000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "stuck"), &1000);
+    s.env.ledger().set_timestamp(1000 + 604_801);
+    s.client.confirm_insurance_inactivity(&s.admin, &escrow_id, &true);
+    s.client.claim_insurance(&buyer, &escrow_id);
+
+    assert_eq!(s.token_client.balance(&buyer), 100);
+    assert_eq!(s.client.get_insurance_pool(), 0);
+}
+
+// ===========================================================================
+//  Issue #138: Arbitration Fee Mechanism Tests
+// ===========================================================================
+
+#[test]
+fn test_arbiter_fee_deducted_from_loser_seller_wins() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    // 500 bps = 5% arbiter fee
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: Some(500u32),
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
+    // Seller wins
+    s.client.resolve_dispute(&arbiter, &escrow_id, &true);
+
+    // fee = 1000 * 500 / 10000 = 50; seller gets 950
+    assert_eq!(s.token_client.balance(&arbiter), 50);
+    assert_eq!(s.token_client.balance(&seller), 950);
+    assert_eq!(s.token_client.balance(&buyer), 0);
+}
+
+#[test]
+fn test_arbiter_fee_deducted_from_loser_buyer_wins() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: Some(500u32),
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
+    // Buyer wins
+    s.client.resolve_dispute(&arbiter, &escrow_id, &false);
+
+    // fee = 50; buyer gets 950
+    assert_eq!(s.token_client.balance(&arbiter), 50);
+    assert_eq!(s.token_client.balance(&buyer), 950);
+    assert_eq!(s.token_client.balance(&seller), 0);
+}
+
+#[test]
+fn test_arbiter_fee_zero_is_valid() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: Some(0u32),
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &true);
+
+    assert_eq!(s.token_client.balance(&arbiter), 0);
+    assert_eq!(s.token_client.balance(&seller), 1000);
+}
+
+#[test]
+fn test_arbiter_fee_cap_enforced_at_creation() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: Some(1001u32), // exceeds 1000 bps max
+    };
+    let result = s.client.try_create_escrow_v2(&buyer, &request);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_default_arbiter_fee_applies_when_escrow_fee_not_set() {
+    let s = setup();
+
+    // Set protocol-wide default to 200 bps (2%)
+    s.client.set_default_arbiter_fee_bps(&s.admin, &200u32);
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let escrow_id = s.client.create_escrow(
+        &buyer, &seller, &arbiter, &1000, &s.token_addr, &deadline,
+        &None, &Vec::new(&s.env), &false, &0u32,
+    );
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &true);
+
+    // fee = 1000 * 200 / 10000 = 20
+    assert_eq!(s.token_client.balance(&arbiter), 20);
+    assert_eq!(s.token_client.balance(&seller), 980);
+}
+
+#[test]
+fn test_arbiter_fee_emits_event() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    let deadline = s.env.ledger().timestamp() + 1000;
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: Some(300u32),
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "dispute"), &1000);
+    s.client.resolve_dispute(&arbiter, &escrow_id, &true);
+
+    let events = s.env.events().all();
+    let topic = (Symbol::new(&s.env, "arbiter_fee_paid"),).into_val(&s.env);
+    let found = events.iter().any(|e| e.1 == topic);
+    assert!(found, "Expected arbiter_fee_paid event");
+}
+
+// ===========================================================================
+//  Issue #139: Time-Locked Escrow Tests
+// ===========================================================================
+
+#[test]
+fn test_release_before_min_lock_until_panics() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let lock_until = 2000u64;
+    let deadline = 3000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Still before lock_until
+    s.env.ledger().set_timestamp(1500);
+    let result = s.client.try_release_escrow(&buyer, &escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_release_at_min_lock_until_succeeds() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let lock_until = 2000u64;
+    let deadline = 3000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Exactly at lock_until
+    s.env.ledger().set_timestamp(2000);
+    s.client.release_escrow(&buyer, &escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert_eq!(s.token_client.balance(&seller), 500);
+}
+
+#[test]
+fn test_release_after_min_lock_until_succeeds() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let lock_until = 2000u64;
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    s.env.ledger().set_timestamp(2500);
+    s.client.release_escrow(&buyer, &escrow_id);
+
+    assert_eq!(s.token_client.balance(&seller), 500);
+}
+
+#[test]
+fn test_dispute_not_blocked_by_lock() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(1000);
+    let lock_until = 5000u64;
+    let deadline = 6000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Still locked, but dispute should work
+    s.env.ledger().set_timestamp(2000);
+    s.client.dispute_escrow(&buyer, &escrow_id, &String::from_str(&s.env, "issue"), &500);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Disputed);
+}
+
+#[test]
+fn test_lock_and_deadline_independently_configurable() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let lock_until = 500u64;
+    let deadline = 1000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.extensions.min_lock_until, Some(lock_until));
+    assert_eq!(escrow.deadline, deadline);
+}
+
+#[test]
+fn test_time_locked_escrow_emits_event() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let lock_until = 500u64;
+    let deadline = 1000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(lock_until),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    s.client.create_escrow_v2(&buyer, &request);
+
+    let events = s.env.events().all();
+    let topic = (Symbol::new(&s.env, "escrow_time_locked"),).into_val(&s.env);
+    let found = events.iter().any(|e| e.1 == topic);
+    assert!(found, "Expected escrow_time_locked event");
+}
+
+#[test]
+fn test_deadline_must_be_after_lock_until() {
+    let s = setup();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    // deadline == lock_until → should panic
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 500,
+        token: s.token_addr.clone(),
+        deadline: 500,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: Some(500u64),
+        release_base: None,
+        release_quote: None,
+        release_comparison: None,
+        release_threshold_price: None,
+        arbiter_fee_bps: None,
+    };
+    let result = s.client.try_create_escrow_v2(&buyer, &request);
+    assert!(result.is_err());
+}
+
+// ===========================================================================
+//  Issue #140: Oracle-Conditional Escrow Release Tests
+// ===========================================================================
+
+/// Mock oracle for escrow oracle-release tests.
+mod escrow_mock_oracle {
+    use crate::PriceData;
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+
+    #[contracttype]
+    enum OracleKey {
+        Price,
+        Ts,
+    }
+
+    #[contract]
+    pub struct EscrowMockOracle;
+
+    #[contractimpl]
+    impl EscrowMockOracle {
+        pub fn set_price(env: Env, price: i128, timestamp: u64) {
+            env.storage().instance().set(&OracleKey::Price, &price);
+            env.storage().instance().set(&OracleKey::Ts, &timestamp);
+        }
+
+        pub fn lastprice(env: Env, _base: Address, _quote: Address) -> Option<PriceData> {
+            let price: i128 = env.storage().instance().get(&OracleKey::Price)?;
+            let timestamp: u64 = env.storage().instance().get(&OracleKey::Ts)?;
+            Some(PriceData { price, timestamp })
+        }
+    }
+}
+
+use escrow_mock_oracle::EscrowMockOracle;
+
+struct OracleEscrowSetup<'a> {
+    env: Env,
+    client: AhjoorEscrowContractClient<'a>,
+    admin: Address,
+    token_addr: Address,
+    token_client: TokenClient<'a>,
+    token_admin_client: TokenAdminClient<'a>,
+    oracle_addr: Address,
+    base: Address,
+    quote: Address,
+}
+
+fn setup_oracle_escrow<'a>() -> OracleEscrowSetup<'a> {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AhjoorEscrowContract, ());
+    let client = AhjoorEscrowContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_client = TokenClient::new(&env, &token_addr);
+    let token_admin_client = TokenAdminClient::new(&env, &token_addr);
+
+    let oracle_addr = env.register(EscrowMockOracle, ());
+    let base = Address::generate(&env);
+    let quote = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.add_allowed_token(&admin, &token_addr);
+    client.set_oracle(&admin, &oracle_addr, &300u64);
+
+    OracleEscrowSetup {
+        env,
+        client,
+        admin,
+        token_addr,
+        token_client,
+        token_admin_client,
+        oracle_addr,
+        base,
+        quote,
+    }
+}
+
+fn set_escrow_oracle_price(s: &OracleEscrowSetup, price: i128, ts: u64) {
+    use escrow_mock_oracle::EscrowMockOracleClient;
+    let oc = EscrowMockOracleClient::new(&s.env, &s.oracle_addr);
+    oc.set_price(&price, &ts);
+    s.env.ledger().set_timestamp(ts);
+}
+
+#[test]
+fn test_oracle_release_triggers_when_price_below_threshold() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    // LessOrEqual condition: release when price <= 500
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32), // LessOrEqual
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Price = 400 <= 500 → condition met
+    set_escrow_oracle_price(&s, 400, 200);
+    s.client.check_and_release_escrow(&escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert_eq!(s.token_client.balance(&seller), 1000);
+}
+
+#[test]
+fn test_oracle_release_does_not_trigger_when_price_above_threshold() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32), // LessOrEqual
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Price = 600 > 500 → condition NOT met
+    set_escrow_oracle_price(&s, 600, 200);
+    let result = s.client.try_check_and_release_escrow(&escrow_id);
+    assert!(result.is_err());
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Active);
+}
+
+#[test]
+fn test_oracle_release_triggers_when_price_at_threshold() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32), // LessOrEqual
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Price exactly at threshold = 500 → condition met (<=)
+    set_escrow_oracle_price(&s, 500, 200);
+    s.client.check_and_release_escrow(&escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}
+
+#[test]
+fn test_oracle_release_greater_or_equal_condition() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(1u32), // GreaterOrEqual
+        release_threshold_price: Some(1000),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Price = 1200 >= 1000 → condition met
+    set_escrow_oracle_price(&s, 1200, 200);
+    s.client.check_and_release_escrow(&escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}
+
+#[test]
+fn test_oracle_stale_price_blocks_release() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32),
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Set price at ts=0, advance ledger to ts=500 → age=500 > max_oracle_age(300)
+    use escrow_mock_oracle::EscrowMockOracleClient;
+    let oc = EscrowMockOracleClient::new(&s.env, &s.oracle_addr);
+    oc.set_price(&400, &0u64);
+    s.env.ledger().set_timestamp(500);
+
+    let result = s.client.try_check_and_release_escrow(&escrow_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_manual_release_works_regardless_of_oracle_condition() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    // Oracle condition: price <= 500, but we won't set a price that meets it
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32),
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    // Manual release by buyer still works regardless of oracle
+    s.client.release_escrow(&buyer, &escrow_id);
+
+    let escrow = s.client.get_escrow(&escrow_id);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert_eq!(s.token_client.balance(&seller), 1000);
+}
+
+#[test]
+fn test_oracle_release_emits_event() {
+    let s = setup_oracle_escrow();
+
+    let buyer = Address::generate(&s.env);
+    let seller = Address::generate(&s.env);
+    let arbiter = Address::generate(&s.env);
+    s.token_admin_client.mint(&buyer, &1000);
+
+    s.env.ledger().set_timestamp(100);
+    let deadline = 5000u64;
+
+    let request = EscrowCreateRequest {
+        seller: seller.clone(),
+        arbiter: arbiter.clone(),
+        amount: 1000,
+        token: s.token_addr.clone(),
+        deadline,
+        metadata_hash: None,
+        sellers: Vec::new(&s.env),
+        auto_renew: false,
+        renewal_count: 0,
+        buyer_inactivity_secs: 0,
+        min_lock_until: None,
+        release_base: Some(s.base.clone()),
+        release_quote: Some(s.quote.clone()),
+        release_comparison: Some(0u32),
+        release_threshold_price: Some(500),
+        arbiter_fee_bps: None,
+    };
+    let escrow_id = s.client.create_escrow_v2(&buyer, &request);
+
+    set_escrow_oracle_price(&s, 300, 200);
+    s.client.check_and_release_escrow(&escrow_id);
+
+    let events = s.env.events().all();
+    let topic = (Symbol::new(&s.env, "oracle_release_triggered"),).into_val(&s.env);
+    let found = events.iter().any(|e| e.1 == topic);
+    assert!(found, "Expected oracle_release_triggered event");
+}

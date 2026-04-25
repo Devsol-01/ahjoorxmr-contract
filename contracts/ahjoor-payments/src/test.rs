@@ -3909,3 +3909,363 @@ fn test_scheduled_payment_cannot_cancel_after_ready() {
     s.env.ledger().set_timestamp(2_000);
     s.client.cancel_scheduled_payment(&customer, &pid);
 }
+
+// ===========================================================================
+//  #122 Payment Categories and Tags
+// ===========================================================================
+
+#[test]
+fn test_create_payment_with_category_indexed() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let cat = soroban_sdk::Symbol::new(&s.env, "marketing");
+
+    let pid = s.client.create_payment_with_extras(
+        &customer,
+        &merchant,
+        &500,
+        &s.token_addr,
+        &Some(cat.clone()),
+        &None,
+        &None,
+    );
+
+    let results = s.client.get_payments_by_category(&merchant, &cat, &0, &10);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results.get(0).unwrap(), pid);
+
+    let payment = s.client.get_payment(&pid);
+    assert!(payment.category.is_some());
+}
+
+#[test]
+fn test_get_payments_by_category_pagination() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &10_000);
+    let cat = soroban_sdk::Symbol::new(&s.env, "promo");
+
+    for _ in 0..5u32 {
+        s.client.create_payment_with_extras(
+            &customer,
+            &merchant,
+            &100,
+            &s.token_addr,
+            &Some(cat.clone()),
+            &None,
+            &None,
+        );
+    }
+
+    let page0 = s.client.get_payments_by_category(&merchant, &cat, &0, &3);
+    assert_eq!(page0.len(), 3);
+
+    let page1 = s.client.get_payments_by_category(&merchant, &cat, &1, &3);
+    assert_eq!(page1.len(), 2);
+}
+
+#[test]
+fn test_get_payments_by_category_empty_returns_empty() {
+    let s = setup();
+    s.init();
+    let merchant = Address::generate(&s.env);
+    let cat = soroban_sdk::Symbol::new(&s.env, "empty");
+    let results = s.client.get_payments_by_category(&merchant, &cat, &0, &10);
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Tags list cannot exceed 3 items")]
+fn test_tags_exceeding_3_rejected() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+    let cat = soroban_sdk::Symbol::new(&s.env, "cat");
+    let tags = vec![
+        &s.env,
+        soroban_sdk::Symbol::new(&s.env, "a"),
+        soroban_sdk::Symbol::new(&s.env, "b"),
+        soroban_sdk::Symbol::new(&s.env, "c"),
+        soroban_sdk::Symbol::new(&s.env, "d"),
+    ];
+    s.client.create_payment_with_extras(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &Some(cat),
+        &Some(tags),
+        &None,
+    );
+}
+
+#[test]
+fn test_no_category_does_not_appear_in_index() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    s.client.create_payment(&customer, &merchant, &200, &s.token_addr, &None, &None, &None);
+
+    let cat = soroban_sdk::Symbol::new(&s.env, "anything");
+    let results = s.client.get_payments_by_category(&merchant, &cat, &0, &10);
+    assert_eq!(results.len(), 0);
+}
+
+// ===========================================================================
+//  #123 Bulk Expire Payments
+// ===========================================================================
+
+#[test]
+fn test_bulk_expire_payments_success() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let pid0 = s.client.create_payment(&customer, &merchant, &100, &s.token_addr, &None, &None, &None);
+    let pid1 = s.client.create_payment(&customer, &merchant, &200, &s.token_addr, &None, &None, &None);
+
+    // Advance past default 7-day expiry
+    s.env.ledger().with_mut(|l| l.timestamp = 7 * 24 * 60 * 60 + 1);
+
+    let customer_balance_before = s.token_client.balance(&customer);
+    s.client.bulk_expire_payments(&s.admin, &vec![&s.env, pid0, pid1]);
+
+    assert_eq!(s.client.get_payment(&pid0).status, PaymentStatus::Expired);
+    assert_eq!(s.client.get_payment(&pid1).status, PaymentStatus::Expired);
+    assert_eq!(
+        s.token_client.balance(&customer),
+        customer_balance_before + 300
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_bulk_expire_ineligible_payment_reverts_entire_batch() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let pid0 = s.client.create_payment(&customer, &merchant, &100, &s.token_addr, &None, &None, &None);
+    let pid1 = s.client.create_payment(&customer, &merchant, &200, &s.token_addr, &None, &None, &None);
+
+    // Advance past expiry then complete pid1 so it is ineligible
+    s.env.ledger().with_mut(|l| l.timestamp = 7 * 24 * 60 * 60 + 1);
+    s.client.complete_payment(&pid1);
+
+    // Batch contains one eligible (pid0) and one ineligible (pid1, Completed) — must revert
+    s.client.bulk_expire_payments(&s.admin, &vec![&s.env, pid0, pid1]);
+}
+
+#[test]
+#[should_panic(expected = "Batch size exceeds maximum allowed")]
+fn test_bulk_expire_exceeds_cap_rejected() {
+    let s = setup();
+    s.init();
+    let mut ids = soroban_sdk::Vec::new(&s.env);
+    for i in 0u32..51 {
+        ids.push_back(i);
+    }
+    s.client.bulk_expire_payments(&s.admin, &ids);
+}
+
+#[test]
+#[should_panic(expected = "Payment has not expired yet")]
+fn test_bulk_expire_not_expired_rejected() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &500);
+
+    let pid = s.client.create_payment(&customer, &merchant, &100, &s.token_addr, &None, &None, &None);
+    // Do NOT advance time — payment hasn't expired
+    s.client.bulk_expire_payments(&s.admin, &vec![&s.env, pid]);
+}
+
+// ===========================================================================
+//  #124 Subscription Pause and Resume
+// ===========================================================================
+
+#[test]
+fn test_pause_subscription_blocks_charge() {
+    let s = setup();
+    s.init();
+    let subscriber = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&subscriber, &10_000);
+
+    let sub_id = s.client.create_subscription(
+        &subscriber, &merchant, &100, &s.token_addr, &60, &10,
+    );
+
+    s.client.pause_subscription(&subscriber, &sub_id);
+
+    let sub = s.client.get_subscription(&sub_id);
+    assert!(sub.paused);
+    assert!(sub.paused_at > 0);
+}
+
+#[test]
+#[should_panic]
+fn test_charge_paused_subscription_fails() {
+    let s = setup();
+    s.init();
+    let subscriber = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&subscriber, &10_000);
+
+    let sub_id = s.client.create_subscription(
+        &subscriber, &merchant, &100, &s.token_addr, &60, &10,
+    );
+
+    // Initial charge succeeds
+    s.client.charge_subscription(&sub_id);
+
+    s.client.pause_subscription(&subscriber, &sub_id);
+
+    // Advance past interval
+    s.env.ledger().with_mut(|l| l.timestamp += 120);
+
+    // Should panic with SubscriptionPaused
+    s.client.charge_subscription(&sub_id);
+}
+
+#[test]
+fn test_resume_resets_interval_from_resume_time() {
+    let s = setup();
+    s.init();
+    let subscriber = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&subscriber, &10_000);
+
+    let sub_id = s.client.create_subscription(
+        &subscriber, &merchant, &100, &s.token_addr, &60, &10,
+    );
+
+    // Charge once to set last_charged_at
+    s.client.charge_subscription(&sub_id);
+    let after_first_charge = s.env.ledger().timestamp();
+
+    // Pause mid-interval
+    s.env.ledger().with_mut(|l| l.timestamp = after_first_charge + 30);
+    s.client.pause_subscription(&subscriber, &sub_id);
+
+    // Advance through a full interval while paused
+    s.env.ledger().with_mut(|l| l.timestamp = after_first_charge + 120);
+    s.client.resume_subscription(&subscriber, &sub_id);
+    let resumed_at = s.env.ledger().timestamp();
+
+    let sub = s.client.get_subscription(&sub_id);
+    assert!(!sub.paused);
+    // last_charged_at was reset to resumed_at, so next charge needs resumed_at + 60
+    assert_eq!(sub.last_charged_at, resumed_at);
+}
+
+#[test]
+#[should_panic(expected = "Only the subscriber can pause")]
+fn test_non_subscriber_cannot_pause() {
+    let s = setup();
+    s.init();
+    let subscriber = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    let other = Address::generate(&s.env);
+    s.token_admin_client.mint(&subscriber, &1000);
+
+    let sub_id = s.client.create_subscription(
+        &subscriber, &merchant, &100, &s.token_addr, &60, &5,
+    );
+
+    s.client.pause_subscription(&other, &sub_id);
+}
+
+#[test]
+#[should_panic(expected = "Subscription is not paused")]
+fn test_resume_not_paused_subscription_fails() {
+    let s = setup();
+    s.init();
+    let subscriber = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&subscriber, &1000);
+
+    let sub_id = s.client.create_subscription(
+        &subscriber, &merchant, &100, &s.token_addr, &60, &5,
+    );
+
+    s.client.resume_subscription(&subscriber, &sub_id);
+}
+
+// ===========================================================================
+//  #125 Conditional Payment Release via Oracle Price Threshold
+// ===========================================================================
+
+#[test]
+fn test_conditional_payment_stores_condition() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+    let asset = Address::generate(&s.env);
+
+    let condition = OracleCondition {
+        asset: asset.clone(),
+        threshold: 50_000_0000000i128,
+        direction: OracleDirection::Gte,
+    };
+
+    let pid = s.client.create_payment_with_extras(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &Some(condition.clone()),
+    );
+
+    let payment = s.client.get_payment(&pid);
+    assert!(payment.release_condition.is_some());
+    let stored = payment.release_condition.unwrap();
+    assert_eq!(stored.threshold, condition.threshold);
+    assert_eq!(stored.direction, OracleDirection::Gte);
+    assert_eq!(stored.asset, asset);
+}
+
+#[test]
+fn test_payment_without_condition_completes_normally() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let pid = s.client.create_payment_with_extras(
+        &customer,
+        &merchant,
+        &300,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    s.client.complete_payment(&pid);
+
+    let payment = s.client.get_payment(&pid);
+    assert_eq!(payment.status, PaymentStatus::Completed);
+}

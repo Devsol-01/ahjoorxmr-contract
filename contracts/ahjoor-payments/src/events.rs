@@ -839,3 +839,119 @@ pub fn emit_notification_key_registered(e: &Env, merchant: Address, key: soroban
 pub fn emit_notification_key_removed(e: &Env, merchant: Address) {
     NotificationKeyRemoved { merchant }.publish(e);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1: External ID Events
+// ---------------------------------------------------------------------------
+
+/// Event: Payment indexed by merchant external_id
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentIndexedByExternalId {
+    pub payment_id: u32,
+    pub external_id: BytesN<32>,
+}
+
+pub fn emit_payment_indexed_by_external_id(e: &Env, payment_id: u32, external_id: BytesN<32>) {
+    PaymentIndexedByExternalId { payment_id, external_id }.publish(e);
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: Multi-Sig Approval Events
+// ---------------------------------------------------------------------------
+
+/// Event: A signer approved a PendingApproval payment
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentApproved {
+    pub payment_id: u32,
+    pub signer: Address,
+}
+
+/// Event: Approval window expired; payment auto-cancelled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentApprovalExpired {
+    pub payment_id: u32,
+}
+
+pub fn emit_payment_approved(e: &Env, payment_id: u32, signer: Address) {
+    PaymentApproved { payment_id, signer }.publish(e);
+}
+
+pub fn emit_payment_approval_expired(e: &Env, payment_id: u32) {
+    PaymentApprovalExpired { payment_id }.publish(e);
+}
+
+// ---------------------------------------------------------------------------
+// Task 3: Voucher Events
+// ---------------------------------------------------------------------------
+
+/// Event: Merchant issued a voucher
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoucherIssued {
+    pub merchant: Address,
+    pub code_hash: BytesN<32>,
+    pub discount_type: crate::DiscountType,
+    pub discount_value: u32,
+    pub max_uses: u32,
+    pub expiry: u64,
+}
+
+/// Event: Voucher redeemed by a customer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoucherRedeemed {
+    pub merchant: Address,
+    pub code_hash: BytesN<32>,
+    pub customer: Address,
+    pub discount_applied: i128,
+}
+
+/// Event: Voucher revoked by merchant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoucherRevoked {
+    pub merchant: Address,
+    pub code_hash: BytesN<32>,
+}
+
+/// Event: Voucher exhausted (all uses consumed)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VoucherExhausted {
+    pub merchant: Address,
+    pub code_hash: BytesN<32>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_voucher_issued(
+    e: &Env,
+    merchant: Address,
+    code_hash: BytesN<32>,
+    discount_type: crate::DiscountType,
+    discount_value: u32,
+    max_uses: u32,
+    expiry: u64,
+) {
+    VoucherIssued { merchant, code_hash, discount_type, discount_value, max_uses, expiry }.publish(e);
+}
+
+pub fn emit_voucher_redeemed(
+    e: &Env,
+    merchant: Address,
+    code_hash: BytesN<32>,
+    customer: Address,
+    discount_applied: i128,
+) {
+    VoucherRedeemed { merchant, code_hash, customer, discount_applied }.publish(e);
+}
+
+pub fn emit_voucher_revoked(e: &Env, merchant: Address, code_hash: BytesN<32>) {
+    VoucherRevoked { merchant, code_hash }.publish(e);
+}
+
+pub fn emit_voucher_exhausted(e: &Env, merchant: Address, code_hash: BytesN<32>) {
+    VoucherExhausted { merchant, code_hash }.publish(e);
+}

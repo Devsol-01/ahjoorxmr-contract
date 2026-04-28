@@ -1077,3 +1077,68 @@ pub fn emit_reinstatement_approved(e: &Env, member: Address) {
 pub fn emit_reinstatement_fee_collected(e: &Env, member: Address, amount: i128) {
     e.events().publish((Symbol::new(e, "ReinFee"),), (member, amount));
 }
+
+// #224: Cycle Completion Bonus Events
+
+/// Event: Cycle bonus amount configured by admin
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CycleBonusConfigured {
+    pub amount: i128,
+}
+
+/// Event: Cycle bonus paid to a qualifying member
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CycleBonusPaid {
+    pub member: Address,
+    pub amount: i128,
+    pub cycle: u32,
+}
+
+/// Event: Cycle bonus prorated due to insufficient reward pool
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CycleBonusProrated {
+    pub cycle: u32,
+    pub shortfall: i128,
+}
+
+pub fn emit_cycle_bonus_configured(e: &Env, amount: i128) {
+    CycleBonusConfigured { amount }.publish(e);
+}
+
+pub fn emit_cycle_bonus_paid(e: &Env, member: Address, amount: i128, cycle: u32) {
+    CycleBonusPaid { member, amount, cycle }.publish(e);
+}
+
+pub fn emit_cycle_bonus_prorated(e: &Env, cycle: u32, shortfall: i128) {
+    CycleBonusProrated { cycle, shortfall }.publish(e);
+}
+
+// #227: Round Duration Update Events
+
+/// Event: Round duration update scheduled (pending, takes effect next round)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundDurationUpdateScheduled {
+    pub old_duration: u64,
+    pub new_duration: u64,
+    pub effective_from_round: u32,
+}
+
+/// Event: Pending round duration applied at round start
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RoundDurationApplied {
+    pub round: u32,
+    pub duration: u64,
+}
+
+pub fn emit_round_duration_update_scheduled(e: &Env, old_duration: u64, new_duration: u64, effective_from_round: u32) {
+    RoundDurationUpdateScheduled { old_duration, new_duration, effective_from_round }.publish(e);
+}
+
+pub fn emit_round_duration_applied(e: &Env, round: u32, duration: u64) {
+    RoundDurationApplied { round, duration }.publish(e);
+}

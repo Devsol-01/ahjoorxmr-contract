@@ -1331,12 +1331,133 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey::SuspendedMembers, &suspended_members);
 
+        // ── #224: Cycle completion bonus ──────────────────────────────────────
+        // A cycle ends when (current_round + 1) is a multiple of payout_order.len().
+        let payout_order: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PayoutOrder)
+            .unwrap_or(Vec::new(&env));
+        let cycle_len = payout_order.len() as u32;
+        if cycle_len > 0 && (current_round + 1) % cycle_len == 0 {
+            let bonus_amount: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::CycleBonusAmount)
+                .unwrap_or(0);
+            if bonus_amount > 0 {
+                let cycle_number = (current_round + 1) / cycle_len;
+                let cycle_start = (cycle_number - 1) * cycle_len;
+                let mut qualifying: Vec<Address> = Vec::new(&env);
+                for member in members.iter() {
+                    if exited_members.contains(&member) { continue; }
+                    let defaults = default_count.get(member.clone()).unwrap_or(0);
+                    let mut had_skip = false;
+                    for r in cycle_start..=(current_round) {
+                        if skip_requests.get((member.clone(), r)).unwrap_or(false) {
+                            had_skip = true;
+                            break;
+                        }
+                    }
+                    if defaults == 0 && !had_skip {
+                        qualifying.push_back(member);
+                    }
+                }
+                let q_count = qualifying.len() as i128;
+                if q_count > 0 {
+                    let total_needed = bonus_amount * q_count;
+                    let mut reward_pool: i128 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::RewardPool)
+                        .unwrap_or(0);
+                    let actual_bonus = if reward_pool >= total_needed {
+                        bonus_amount
+                    } else if reward_pool > 0 {
+                        let prorated = reward_pool / q_count;
+                        let shortfall = total_needed - reward_pool;
+                        events::emit_cycle_bonus_prorated(&env, cycle_number, shortfall);
+                        prorated
+                    } else {
+                        0
+                    };
+                    if actual_bonus > 0 {
+                        let token_addr: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+                        let token_client = token::Client::new(&env, &token_addr);
+                        for member in qualifying.iter() {
+                            token_client.transfer(
+                                &env.current_contract_address(),
+                                &member,
+                                &actual_bonus,
+                            );
+                            reward_pool -= actual_bonus;
+                            events::emit_cycle_bonus_paid(&env, member, actual_bonus, cycle_number);
+                        }
+                        env.storage().instance().set(&DataKey::RewardPool, &reward_pool);
+                    }
+                }
+            }
+        }
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    pub fn penalise_defaulter(env: Env, member: Address) {
+    // ─── #224: Cycle Completion Bonus ────────────────────────────────────────
+
+    /// Admin sets the per-member cycle completion bonus drawn from the reward pool.
+    pub fn set_cycle_bonus(env: Env, admin: Address, amount: i128) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        if amount < 0 { panic_with_error!(&env, Error::AmountMustBePositive); }
+        env.storage().instance().set(&DataKey2::CycleBonusAmount, &amount);
+        events::emit_cycle_bonus_configured(&env, amount);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Returns the configured cycle bonus amount (0 if not set).
+    pub fn get_cycle_bonus(env: Env) -> i128 {
+        env.storage().instance().get(&DataKey2::CycleBonusAmount).unwrap_or(0)
+    }
+
+    // ─── #227: Round Duration Update ─────────────────────────────────────────
+
+    /// Admin schedules a round duration change that takes effect from the next round.
+    /// `new_duration_seconds` must be within [min_round_duration, max_round_duration].
+    pub fn update_round_duration(env: Env, admin: Address, new_duration_seconds: u64) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+
+        let min_dur: u64 = env.storage().instance().get(&DataKey2::MinRoundDuration).unwrap_or(60);
+        let max_dur: u64 = env.storage().instance().get(&DataKey2::MaxRoundDuration).unwrap_or(u64::MAX);
+        if new_duration_seconds < min_dur || new_duration_seconds > max_dur {
+            panic_with_error!(&env, Error::RoundDurationOutOfBounds);
+        }
+
+        let old_duration: u64 = env.storage().instance().get(&DataKey::RoundDuration).unwrap_or(0);
+        let current_round: u32 = env.storage().instance().get(&DataKey::CurrentRound).unwrap_or(0);
+
+        env.storage().instance().set(&DataKey2::PendingRoundDuration, &new_duration_seconds);
+        events::emit_round_duration_update_scheduled(&env, old_duration, new_duration_seconds, current_round + 1);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin configures the min/max bounds for round duration.
+    pub fn set_round_duration_bounds(env: Env, admin: Address, min_seconds: u64, max_seconds: u64) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        if min_seconds == 0 || min_seconds > max_seconds { panic_with_error!(&env, Error::InvalidAmount); }
+        env.storage().instance().set(&DataKey2::MinRoundDuration, &min_seconds);
+        env.storage().instance().set(&DataKey2::MaxRoundDuration, &max_seconds);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
         internals::check_not_paused(&env);
         let admin: Address = env
             .storage()

@@ -318,11 +318,18 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
 /// Advances the round counter, clears paid-members and per-round contributions,
 /// and sets a new deadline.
 pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
-    let duration: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::RoundDuration)
-        .unwrap();
+    // #227: Apply pending round duration if one was scheduled
+    let pending_duration: Option<u64> = env.storage().instance().get(&DataKey2::PendingRoundDuration);
+    let duration: u64 = if let Some(pending) = pending_duration {
+        env.storage().instance().set(&DataKey::RoundDuration, &pending);
+        env.storage().instance().remove(&DataKey2::PendingRoundDuration);
+        // Also update RoundDurationSeconds for timestamp-based scheduling
+        env.storage().instance().set(&DataKey::RoundDurationSeconds, &pending);
+        events::emit_round_duration_applied(env, current_round + 1, pending);
+        pending
+    } else {
+        env.storage().instance().get(&DataKey::RoundDuration).unwrap()
+    };
     env.storage()
         .instance()
         .set(&DataKey::CurrentRound, &(current_round + 1));

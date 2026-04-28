@@ -249,6 +249,10 @@ pub enum DataKey {
     TokenWhitelistContract,
     /// #215: time-lock metadata per escrow
     TimeLockData(u32),
+    /// #225: max top-up as basis points of original escrow amount (e.g. 5000 = 50%)
+    MaxTopUpBps,
+    /// #225: cumulative top-up amount per escrow
+    EscrowToppedUpAmount(u32),
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 200; // 2%
@@ -3490,6 +3494,102 @@ impl AhjoorEscrowContract {
                 .set(&DataKey::ContractVersion, &initial_version);
             initial_version
         }
+    }
+
+    // ─── #225: Escrow Buyer Deposit Top-Up ───────────────────────────────────
+
+    /// Admin sets the maximum cumulative top-up as basis points of the original amount.
+    /// Default: 5000 bps = 50%.
+    pub fn set_max_top_up_bps(env: Env, admin: Address, max_top_up_bps: u32) {
+        Self::require_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can set max top-up bps");
+        }
+        env.storage().instance().set(&DataKey::MaxTopUpBps, &max_top_up_bps);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Buyer tops up an active or pending-release escrow with additional funds.
+    /// Rejected if escrow is Disputed, Released, or Cancelled.
+    /// Total cumulative top-ups are capped at `max_top_up_bps` of the original amount.
+    pub fn top_up_escrow(env: Env, buyer: Address, escrow_id: u32, amount: i128) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        if amount <= 0 {
+            panic!("Top-up amount must be positive");
+        }
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.buyer != buyer {
+            panic!("Only the buyer can top up this escrow");
+        }
+
+        // Only Active or PartiallyReleased states are allowed
+        match escrow.status {
+            EscrowStatus::Active | EscrowStatus::PartiallyReleased => {}
+            _ => panic!("Escrow is not in a top-up eligible state"),
+        }
+
+        // Enforce max_top_up_bps cap
+        let max_top_up_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTopUpBps)
+            .unwrap_or(5_000); // default 50%
+        let original_amount = escrow.amount;
+        let already_topped_up: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowToppedUpAmount(escrow_id))
+            .unwrap_or(0);
+        let max_top_up = (original_amount * max_top_up_bps as i128) / 10_000;
+        if already_topped_up + amount > max_top_up {
+            panic!("Top-up would exceed maximum allowed top-up amount");
+        }
+
+        // Transfer funds from buyer to contract
+        let token_client = token::Client::new(&env, &escrow.token);
+        token_client.transfer(&buyer, &env.current_contract_address(), &amount);
+
+        // Update escrow amount and cumulative top-up tracker
+        escrow.amount += amount;
+        let new_total = escrow.amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        let new_topped_up = already_topped_up + amount;
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowToppedUpAmount(escrow_id), &new_topped_up);
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowToppedUpAmount(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_escrow_topped_up(&env, escrow_id, amount, new_total, buyer);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 }
 

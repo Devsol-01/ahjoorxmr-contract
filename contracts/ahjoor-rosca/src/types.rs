@@ -246,10 +246,17 @@ pub enum DataKey2 {
     ReinstatementFee,        // i128
     PendingReinstatementFee, // Vec<Address>
     ActiveReinstatementProposal, // Map<Address, u32>
+    // #224: Cycle Completion Bonus
+    CycleBonusAmount,        // i128 — bonus per qualifying member per cycle
+    // #227: Round Duration Update
+    PendingRoundDuration,    // u64 — new duration to apply at next round start
+    MinRoundDuration,        // u64 — lower bound for round duration
+    MaxRoundDuration,        // u64 — upper bound for round duration
+    // Waitlist
+    Waitlist,                // Vec<(Address, u64)> — (address, joined_at)
+    CatchUpDebt,             // Map<Address, i128> — catch-up contributions owed
     StartAt,                 // u64
     GroupActivationEmitted,  // bool
-    Waitlist,                // Vec<(Address, u64)>
-    CatchUpDebt,             // Map<Address, i128>
 }
 
 /// Persistent storage keys — kept separate because DataKey was hitting

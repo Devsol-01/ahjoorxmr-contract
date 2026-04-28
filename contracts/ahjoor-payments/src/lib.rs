@@ -263,6 +263,17 @@ pub struct MerchantStats {
     pub volume_completed: Map<Address, i128>,
 }
 
+/// Per-merchant revenue dashboard summary (#226).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MerchantSummary {
+    pub total_volume: i128,
+    pub completed_count: u32,
+    pub failed_count: u32,
+    pub pending_count: u32,
+    pub volume_by_token: Map<Address, i128>,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dispute {
@@ -472,6 +483,8 @@ pub enum DataKey {
     AppealCooldownUntil(Address),
     /// Instance: appeal rejection cooldown in seconds
     AppealRejectionCooldownSeconds,
+    /// Persistent: per-merchant revenue dashboard summary (#226)
+    MerchantSummary(Address),
 }
 
 mod events;
@@ -4300,6 +4313,7 @@ impl AhjoorPaymentsContract {
                             
                             Self::inc_global_refunded(env, &payment.token, payment.amount);
                             Self::inc_merchant_refunded(env, &payment.merchant, &payment.token, payment.amount);
+                            Self::inc_merchant_failed(env, &payment.merchant); // #226
                             
                             events::emit_payment_swap_failed(
                                 env,
@@ -4869,6 +4883,23 @@ impl AhjoorPaymentsContract {
         let mut s = Self::load_merchant_stats(env, merchant);
         s.payments_created += 1;
         Self::save_merchant_stats(env, merchant, &s);
+
+        // #226: Track pending count in MerchantSummary
+        let key = DataKey::MerchantSummary(merchant.clone());
+        let mut summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(env),
+            });
+        summary.pending_count += 1;
+        env.storage().persistent().set(&key, &summary);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
     }
 
     fn inc_merchant_completed(env: &Env, merchant: &Address, token: &Address, amount: i128) {
@@ -4877,6 +4908,62 @@ impl AhjoorPaymentsContract {
         let prev = s.volume_completed.get(token.clone()).unwrap_or(0);
         s.volume_completed.set(token.clone(), prev + amount);
         Self::save_merchant_stats(env, merchant, &s);
+
+        // #226: Update MerchantSummary
+        let key = DataKey::MerchantSummary(merchant.clone());
+        let mut summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(env),
+            });
+        summary.completed_count += 1;
+        if summary.pending_count > 0 { summary.pending_count -= 1; }
+        summary.total_volume += amount;
+        let prev_token = summary.volume_by_token.get(token.clone()).unwrap_or(0);
+        summary.volume_by_token.set(token.clone(), prev_token + amount);
+        env.storage().persistent().set(&key, &summary);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
+
+    fn inc_merchant_failed(env: &Env, merchant: &Address) {
+        let key = DataKey::MerchantSummary(merchant.clone());
+        let mut summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(env),
+            });
+        summary.failed_count += 1;
+        if summary.pending_count > 0 { summary.pending_count -= 1; }
+        env.storage().persistent().set(&key, &summary);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+    }
+        let key = DataKey::MerchantSummary(merchant.clone());
+        let mut summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(env),
+            });
+        summary.failed_count += 1;
+        env.storage().persistent().set(&key, &summary);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
     }
 
     fn inc_merchant_refunded(env: &Env, merchant: &Address, token: &Address, amount: i128) {
@@ -5363,6 +5450,81 @@ impl AhjoorPaymentsContract {
         env.storage()
             .persistent()
             .get(&DataKey::MerchantAppeal(merchant))
+    }
+
+    // ─── #226: Merchant Revenue Dashboard ────────────────────────────────────
+
+    /// Returns the full merchant revenue summary.
+    pub fn get_merchant_summary(env: Env, merchant: Address) -> MerchantSummary {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MerchantSummary(merchant))
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(&env),
+            })
+    }
+
+    /// Returns the completed volume for a specific token for a merchant.
+    pub fn get_merchant_volume_by_token(env: Env, merchant: Address, token: Address) -> i128 {
+        let summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantSummary(merchant))
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(&env),
+            });
+        summary.volume_by_token.get(token).unwrap_or(0)
+    }
+
+    /// Returns (completed_count, failed_count, pending_count) for a merchant.
+    pub fn get_merchant_payment_counts(env: Env, merchant: Address) -> (u32, u32, u32) {
+        let summary: MerchantSummary = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MerchantSummary(merchant))
+            .unwrap_or(MerchantSummary {
+                total_volume: 0,
+                completed_count: 0,
+                failed_count: 0,
+                pending_count: 0,
+                volume_by_token: Map::new(&env),
+            });
+        (summary.completed_count, summary.failed_count, summary.pending_count)
+    }
+
+    /// Admin resets a merchant's dashboard counters.
+    pub fn reset_merchant_stats(env: Env, merchant: Address) {
+        Self::require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let empty = MerchantSummary {
+            total_volume: 0,
+            completed_count: 0,
+            failed_count: 0,
+            pending_count: 0,
+            volume_by_token: Map::new(&env),
+        };
+        let key = DataKey::MerchantSummary(merchant);
+        env.storage().persistent().set(&key, &empty);
+        env.storage().persistent().extend_ttl(
+            &key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
 }

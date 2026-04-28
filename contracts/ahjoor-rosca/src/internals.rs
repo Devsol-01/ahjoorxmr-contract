@@ -1,4 +1,4 @@
-use crate::{errors::Error, events, audit_trail, ContributionEntry, DataKey, DataKey2, PersistentKey, PayoutRecord};
+use crate::{errors::Error, events, audit_trail, ContributionEntry, DataKey, DataKey2, PersistentKey, PayoutRecord, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Env, Map, Vec};
 
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 100_000;
@@ -133,27 +133,52 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         }
     }
 
-    // Draw from insurance pool if there's a shortfall
+    // #214: Draw from insurance pool based on InsuranceCoverageMode
     let mut insurance_pool: i128 = env
         .storage()
         .instance()
         .get(&DataKey2::InsurancePool)
         .unwrap_or(0);
     let shortfall = expected_pot - actual_pot;
-    if shortfall > 0 && insurance_pool > 0 {
-        let draw_amount = if insurance_pool >= shortfall {
-            shortfall
-        } else {
-            insurance_pool
-        };
-        insurance_pool -= draw_amount;
-        env.storage()
-            .instance()
-            .set(&DataKey2::InsurancePool, &insurance_pool);
-        events::emit_insurance_paid_out(env, current_round, draw_amount, insurance_pool);
+    let coverage_mode: InsuranceCoverageMode = env
+        .storage()
+        .instance()
+        .get(&DataKey2::InsuranceCoverageMode)
+        .unwrap_or(InsuranceCoverageMode::Partial);
 
-        // Top up the actual pot with the drawn amount (add to base token balance tracking)
-        actual_pot += draw_amount;
+    if shortfall > 0 && coverage_mode != InsuranceCoverageMode::None {
+        let draw_amount = match coverage_mode {
+            InsuranceCoverageMode::None => 0,
+            InsuranceCoverageMode::Partial => {
+                if insurance_pool >= shortfall { shortfall } else { insurance_pool }
+            }
+            InsuranceCoverageMode::Full => {
+                if insurance_pool >= shortfall {
+                    shortfall
+                } else {
+                    events::emit_insurance_pool_exhausted(env, current_round, shortfall - insurance_pool);
+                    0
+                }
+            }
+        };
+        if draw_amount > 0 {
+            insurance_pool -= draw_amount;
+            env.storage().instance().set(&DataKey2::InsurancePool, &insurance_pool);
+            events::emit_insurance_paid_out(env, current_round, draw_amount, insurance_pool);
+            events::emit_insurance_claim_executed(env, current_round, payout_recipient.clone(), draw_amount);
+            let mut claims: Map<u32, Vec<InsuranceClaim>> = env
+                .storage()
+                .instance()
+                .get(&DataKey2::InsuranceClaims)
+                .unwrap_or(Map::new(env));
+            let mut round_claims: Vec<InsuranceClaim> = claims.get(current_round).unwrap_or(Vec::new(env));
+            round_claims.push_back(InsuranceClaim { round: current_round, defaulter: payout_recipient.clone(), amount_covered: draw_amount });
+            claims.set(current_round, round_claims);
+            env.storage().instance().set(&DataKey2::InsuranceClaims, &claims);
+            actual_pot += draw_amount;
+        }
+    } else if shortfall > 0 && insurance_pool == 0 && coverage_mode != InsuranceCoverageMode::None {
+        events::emit_insurance_pool_exhausted(env, current_round, shortfall);
     }
 
     for token_addr in approved_tokens.iter() {

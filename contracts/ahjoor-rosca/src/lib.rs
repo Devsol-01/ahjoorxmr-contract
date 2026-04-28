@@ -667,6 +667,23 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::AlreadyContributed);
         }
 
+        // #218: collect reinstatement fee before first contribution after reinstatement
+        {
+            let mut pending: Vec<Address> = env.storage().instance().get(&DataKey2::PendingReinstatementFee).unwrap_or(Vec::new(&env));
+            if pending.contains(&contributor) {
+                let fee: i128 = env.storage().instance().get(&DataKey2::ReinstatementFee).unwrap_or(0);
+                if fee > 0 {
+                    let fee_token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
+                    let fee_client = token::Client::new(&env, &fee_token);
+                    fee_client.transfer(&contributor, &env.current_contract_address(), &fee);
+                    events::emit_reinstatement_fee_collected(&env, contributor.clone(), fee);
+                }
+                let mut new_pending: Vec<Address> = Vec::new(&env);
+                for m in pending.iter() { if m != contributor { new_pending.push_back(m); } }
+                env.storage().instance().set(&DataKey2::PendingReinstatementFee, &new_pending);
+            }
+        }
+
         // Validate token
         let approved_tokens: Vec<Address> = env
             .storage()
@@ -2083,6 +2100,28 @@ impl AhjoorContract {
             }
             ProposalType::MaxMembersUpdate => {
                 internals::execute_max_members_update(&env, proposal.execution_data);
+            }
+            // #218: lift suspension, reset defaults, re-append to payout order
+            ProposalType::Reinstatement => {
+                let target = proposal.target_member.clone();
+                let mut suspended: Vec<Address> = env.storage().instance().get(&DataKey::SuspendedMembers).unwrap_or(Vec::new(&env));
+                let mut ns: Vec<Address> = Vec::new(&env);
+                for m in suspended.iter() { if m != target { ns.push_back(m); } }
+                env.storage().instance().set(&DataKey::SuspendedMembers, &ns);
+                let mut dc: Map<Address, u32> = env.storage().instance().get(&DataKey::DefaultCount).unwrap_or(Map::new(&env));
+                dc.set(target.clone(), 0);
+                env.storage().instance().set(&DataKey::DefaultCount, &dc);
+                let mut po: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap_or(Vec::new(&env));
+                if !po.contains(&target) { po.push_back(target.clone()); env.storage().instance().set(&DataKey::PayoutOrder, &po); }
+                let fee: i128 = env.storage().instance().get(&DataKey2::ReinstatementFee).unwrap_or(0);
+                if fee > 0 {
+                    let mut pf: Vec<Address> = env.storage().instance().get(&DataKey2::PendingReinstatementFee).unwrap_or(Vec::new(&env));
+                    if !pf.contains(&target) { pf.push_back(target.clone()); env.storage().instance().set(&DataKey2::PendingReinstatementFee, &pf); }
+                }
+                let mut am: Map<Address, u32> = env.storage().instance().get(&DataKey2::ActiveReinstatementProposal).unwrap_or(Map::new(&env));
+                am.remove(target.clone());
+                env.storage().instance().set(&DataKey2::ActiveReinstatementProposal, &am);
+                events::emit_reinstatement_approved(&env, target);
             }
         }
 
@@ -4154,6 +4193,165 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    // ─── #213: Payout Slot Swap ───────────────────────────────────────────────
+
+    pub fn set_slot_swap_config(env: Env, admin: Address, requires_admin: bool, expiry_seconds: u64) {
+        admin.require_auth();
+        internals::check_not_paused(&env);
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        env.storage().instance().set(&DataKey2::SlotSwapRequiresAdmin, &requires_admin);
+        env.storage().instance().set(&DataKey2::SlotSwapExpirySeconds, &expiry_seconds);
+    }
+
+    pub fn request_slot_swap(env: Env, initiator: Address, round_a: u32, round_b: u32, counterparty: Address) -> u32 {
+        initiator.require_auth();
+        internals::check_not_paused(&env);
+        let members: Vec<Address> = env.storage().instance().get(&DataKey::Members).expect("Not init");
+        if !members.contains(&initiator) || !members.contains(&counterparty) { panic_with_error!(&env, Error::OnlyMembersAllowed); }
+        let current_round: u32 = env.storage().instance().get(&DataKey::CurrentRound).unwrap_or(0);
+        let payout_order: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap();
+        let order_len = payout_order.len() as u32;
+        if round_a >= order_len || round_b >= order_len || round_a <= current_round || round_b <= current_round { panic_with_error!(&env, Error::InvalidAmount); }
+        if payout_order.get(round_a).unwrap() != initiator || payout_order.get(round_b).unwrap() != counterparty { panic_with_error!(&env, Error::OnlyMembersAllowed); }
+        let expiry: u64 = env.storage().instance().get(&DataKey2::SlotSwapExpirySeconds).unwrap_or(86_400);
+        let now = env.ledger().timestamp();
+        let swap_id: u32 = env.storage().instance().get(&DataKey2::SlotSwapCounter).unwrap_or(0) + 1;
+        env.storage().instance().set(&DataKey2::SlotSwapCounter, &swap_id);
+        let swap = SlotSwap { id: swap_id, initiator: initiator.clone(), counterparty: counterparty.clone(), round_a, round_b, status: SlotSwapStatus::Pending, created_at: now, expiry_at: now + expiry, admin_approved: false };
+        let mut swaps: Map<u32, SlotSwap> = env.storage().instance().get(&DataKey2::SlotSwaps).unwrap_or(Map::new(&env));
+        swaps.set(swap_id, swap);
+        env.storage().instance().set(&DataKey2::SlotSwaps, &swaps);
+        events::emit_slot_swap_requested(&env, swap_id, initiator, counterparty, round_a, round_b);
+        swap_id
+    }
+
+    pub fn accept_slot_swap(env: Env, counterparty: Address, swap_id: u32) {
+        counterparty.require_auth();
+        internals::check_not_paused(&env);
+        let mut swaps: Map<u32, SlotSwap> = env.storage().instance().get(&DataKey2::SlotSwaps).unwrap_or(Map::new(&env));
+        let mut swap = swaps.get(swap_id).expect("Swap not found");
+        if swap.counterparty != counterparty { panic_with_error!(&env, Error::OnlyMembersAllowed); }
+        if swap.status != SlotSwapStatus::Pending { panic_with_error!(&env, Error::ProposalNotPending); }
+        if env.ledger().timestamp() > swap.expiry_at {
+            swap.status = SlotSwapStatus::Expired;
+            swaps.set(swap_id, swap);
+            env.storage().instance().set(&DataKey2::SlotSwaps, &swaps);
+            events::emit_slot_swap_expired(&env, swap_id);
+            return;
+        }
+        swap.status = SlotSwapStatus::Accepted;
+        swaps.set(swap_id, swap.clone());
+        env.storage().instance().set(&DataKey2::SlotSwaps, &swaps);
+        events::emit_slot_swap_accepted(&env, swap_id, counterparty);
+        let requires_admin: bool = env.storage().instance().get(&DataKey2::SlotSwapRequiresAdmin).unwrap_or(false);
+        if !requires_admin { Self::execute_slot_swap_inner(&env, swap_id); }
+    }
+
+    pub fn reject_slot_swap(env: Env, counterparty: Address, swap_id: u32) {
+        counterparty.require_auth();
+        let mut swaps: Map<u32, SlotSwap> = env.storage().instance().get(&DataKey2::SlotSwaps).unwrap_or(Map::new(&env));
+        let mut swap = swaps.get(swap_id).expect("Swap not found");
+        if swap.counterparty != counterparty { panic_with_error!(&env, Error::OnlyMembersAllowed); }
+        if swap.status != SlotSwapStatus::Pending { panic_with_error!(&env, Error::ProposalNotPending); }
+        swap.status = SlotSwapStatus::Rejected;
+        swaps.set(swap_id, swap);
+        env.storage().instance().set(&DataKey2::SlotSwaps, &swaps);
+        events::emit_slot_swap_rejected(&env, swap_id, counterparty);
+    }
+
+    pub fn approve_slot_swap(env: Env, admin: Address, swap_id: u32) {
+        admin.require_auth();
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        let mut swaps: Map<u32, SlotSwap> = env.storage().instance().get(&DataKey2::SlotSwaps).unwrap_or(Map::new(&env));
+        let swap = swaps.get(swap_id).expect("Swap not found");
+        if swap.status != SlotSwapStatus::Accepted { panic_with_error!(&env, Error::ProposalNotPending); }
+        Self::execute_slot_swap_inner(&env, swap_id);
+    }
+
+    fn execute_slot_swap_inner(env: &Env, swap_id: u32) {
+        let mut swaps: Map<u32, SlotSwap> = env.storage().instance().get(&DataKey2::SlotSwaps).unwrap_or(Map::new(env));
+        let mut swap = swaps.get(swap_id).unwrap();
+        let mut payout_order: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap();
+        let addr_a = payout_order.get(swap.round_a).unwrap();
+        let addr_b = payout_order.get(swap.round_b).unwrap();
+        let mut new_order: Vec<Address> = Vec::new(env);
+        for (i, addr) in payout_order.iter().enumerate() {
+            if i as u32 == swap.round_a { new_order.push_back(addr_b.clone()); }
+            else if i as u32 == swap.round_b { new_order.push_back(addr_a.clone()); }
+            else { new_order.push_back(addr); }
+        }
+        env.storage().instance().set(&DataKey::PayoutOrder, &new_order);
+        swap.status = SlotSwapStatus::Executed;
+        swaps.set(swap_id, swap.clone());
+        env.storage().instance().set(&DataKey2::SlotSwaps, &swaps);
+        events::emit_slot_swap_executed(env, swap_id, swap.round_a, swap.round_b);
+    }
+
+    // ─── #214: Insurance Coverage Mode ───────────────────────────────────────
+
+    pub fn set_insurance_coverage_mode(env: Env, admin: Address, mode: InsuranceCoverageMode) {
+        admin.require_auth();
+        internals::check_not_paused(&env);
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        env.storage().instance().set(&DataKey2::InsuranceCoverageMode, &mode);
+        events::emit_insurance_coverage_mode_set(&env, mode as u32);
+    }
+
+    pub fn get_insurance_claims(env: Env, round: u32) -> Vec<InsuranceClaim> {
+        let claims: Map<u32, Vec<InsuranceClaim>> = env.storage().instance().get(&DataKey2::InsuranceClaims).unwrap_or(Map::new(&env));
+        claims.get(round).unwrap_or(Vec::new(&env))
+    }
+
+    // ─── #218: Suspended Member Reinstatement ────────────────────────────────
+
+    pub fn set_reinstatement_fee(env: Env, admin: Address, fee: i128) {
+        admin.require_auth();
+        internals::check_not_paused(&env);
+        let a: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != a { panic_with_error!(&env, Error::OnlyAdminAllowed); }
+        if fee < 0 { panic_with_error!(&env, Error::AmountMustBePositive); }
+        env.storage().instance().set(&DataKey2::ReinstatementFee, &fee);
+    }
+
+    pub fn request_reinstatement(env: Env, member: Address, reason_hash: BytesN<32>) -> u32 {
+        member.require_auth();
+        internals::check_not_paused(&env);
+        let suspended: Vec<Address> = env.storage().instance().get(&DataKey::SuspendedMembers).unwrap_or(Vec::new(&env));
+        if !suspended.contains(&member) { panic_with_error!(&env, Error::NotAMember); }
+        let am: Map<Address, u32> = env.storage().instance().get(&DataKey2::ActiveReinstatementProposal).unwrap_or(Map::new(&env));
+        if am.contains_key(member.clone()) { panic_with_error!(&env, Error::AlreadyContributed); }
+        let quorum_config: Map<ProposalType, u32> = env.storage().instance().get(&DataKey2::QuorumConfig).unwrap_or(Map::new(&env));
+        let required_quorum = quorum_config.get(ProposalType::Reinstatement).unwrap_or(5_100);
+        let now = env.ledger().timestamp();
+        let mut proposals: Map<u32, Proposal> = env.storage().instance().get(&DataKey::Proposals).unwrap_or(Map::new(&env));
+        let proposal_id: u32 = env.storage().instance().get(&DataKey::ProposalCounter).unwrap_or(0) + 1;
+        env.storage().instance().set(&DataKey::ProposalCounter, &proposal_id);
+        let proposal = Proposal {
+            id: proposal_id,
+            proposal_type: ProposalType::Reinstatement,
+            creator: member.clone(),
+            description: String::from_str(&env, "Reinstatement request"),
+            target_member: member.clone(),
+            votes_for: 0,
+            votes_against: 0,
+            created_at: now,
+            deadline: now + 604_800,
+            status: ProposalStatus::Pending,
+            execution_data: None,
+            required_quorum,
+        };
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+        let mut active = am;
+        active.set(member.clone(), proposal_id);
+        env.storage().instance().set(&DataKey2::ActiveReinstatementProposal, &active);
+        events::emit_reinstatement_requested(&env, member, proposal_id);
+        proposal_id
     }
 
     /// Get multisig configuration

@@ -135,6 +135,15 @@ pub struct Dispute {
     pub timeout_seconds: Option<u64>,
 }
 
+// #215: time-locked escrow release data
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeLockData {
+    pub unlock_at: u64,
+    pub beneficiary: Address,
+    pub claimed: bool,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeadlineProposal {
@@ -238,12 +247,8 @@ pub enum DataKey {
     ArbiterTimeoutCount(Address),
     /// Token whitelist contract address
     TokenWhitelistContract,
-    /// Global cooling-off window in seconds after dispute resolution
-    ResolutionCoolingOffSeconds,
-    /// Pending verdict stored during cooling-off: (buyer_percent, arbiter, timestamp)
-    PendingVerdict(u32),
-    /// Flag raised during cooling-off: (flagger, reason_hash)
-    ResolutionFlag(u32),
+    /// #215: time-lock metadata per escrow
+    TimeLockData(u32),
 }
 
 const MAX_PROTOCOL_FEE_BPS: u32 = 200; // 2%
@@ -2520,6 +2525,93 @@ impl AhjoorEscrowContract {
     /// Returns the current contract version.
     pub fn get_version(env: Env) -> u32 {
         Self::get_or_init_version(&env)
+    }
+
+    // ─── #215: Time-Locked Escrow Release ────────────────────────────────────
+
+    pub fn create_timelocked_escrow(
+        env: Env,
+        buyer: Address,
+        arbiter: Address,
+        amount: i128,
+        token: Address,
+        deadline: u64,
+        unlock_at: u64,
+        beneficiary: Address,
+        metadata_hash: Option<BytesN<32>>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+        if unlock_at <= env.ledger().timestamp() { panic!("unlock_at must be in the future"); }
+        let request = EscrowCreateRequest {
+            seller: beneficiary.clone(),
+            arbiter,
+            amount,
+            token,
+            deadline,
+            metadata_hash,
+            sellers: Vec::new(&env),
+            auto_renew: false,
+            renewal_count: 0,
+            buyer_inactivity_secs: 0,
+            min_lock_until: Some(unlock_at),
+            release_base: None,
+            release_quote: None,
+            release_comparison: None,
+            release_threshold_price: None,
+            arbiter_fee_bps: None,
+            dispute_default_winner: None,
+        };
+        let escrow_id = Self::create_escrow_core(&env, &buyer, request);
+        let lock_data = TimeLockData { unlock_at, beneficiary: beneficiary.clone(), claimed: false };
+        env.storage().persistent().set(&DataKey::TimeLockData(escrow_id), &lock_data);
+        env.storage().persistent().extend_ttl(&DataKey::TimeLockData(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        events::emit_timelocked_escrow_created(&env, escrow_id, unlock_at, beneficiary);
+        escrow_id
+    }
+
+    pub fn claim_timelocked(env: Env, beneficiary: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        beneficiary.require_auth();
+        let mut lock_data: TimeLockData = env.storage().persistent().get(&DataKey::TimeLockData(escrow_id)).expect("Not a time-locked escrow");
+        if lock_data.claimed { panic!("Already claimed"); }
+        if beneficiary != lock_data.beneficiary { panic!("Only beneficiary can claim"); }
+        if env.ledger().timestamp() < lock_data.unlock_at { panic!("Unlock time has not passed"); }
+        let escrow: Escrow = env.storage().persistent().get(&DataKey::Escrow(escrow_id)).expect("Escrow not found");
+        if escrow.status != EscrowStatus::Active { panic!("Escrow not active"); }
+        let client = token::Client::new(&env, &escrow.token);
+        client.transfer(&env.current_contract_address(), &beneficiary, &escrow.amount);
+        let mut e = escrow.clone();
+        e.status = EscrowStatus::Released;
+        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &e);
+        env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        lock_data.claimed = true;
+        env.storage().persistent().set(&DataKey::TimeLockData(escrow_id), &lock_data);
+        events::emit_timelocked_funds_claimed(&env, escrow_id, beneficiary, escrow.amount);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn cancel_timelocked(env: Env, buyer: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+        let lock_data: TimeLockData = env.storage().persistent().get(&DataKey::TimeLockData(escrow_id)).expect("Not a time-locked escrow");
+        if lock_data.claimed { panic!("Already claimed"); }
+        if env.ledger().timestamp() >= lock_data.unlock_at { panic!("Past unlock time; use claim_timelocked"); }
+        let mut escrow: Escrow = env.storage().persistent().get(&DataKey::Escrow(escrow_id)).expect("Escrow not found");
+        if escrow.buyer != buyer { panic!("Only buyer can cancel"); }
+        if escrow.status == EscrowStatus::Disputed || escrow.status == EscrowStatus::PartiallyDisputed { panic!("Dispute active"); }
+        if escrow.status != EscrowStatus::Active { panic!("Escrow not active"); }
+        let client = token::Client::new(&env, &escrow.token);
+        client.transfer(&env.current_contract_address(), &buyer, &escrow.amount);
+        escrow.status = EscrowStatus::Refunded;
+        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        events::emit_timelocked_escrow_cancelled(&env, escrow_id, buyer);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    pub fn get_timelock_data(env: Env, escrow_id: u32) -> Option<TimeLockData> {
+        env.storage().persistent().get(&DataKey::TimeLockData(escrow_id))
     }
 
     // --- Token Whitelist Integration ---

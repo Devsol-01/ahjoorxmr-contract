@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Env, String};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 /// Event: Escrow created
 #[contractevent]
@@ -763,36 +763,13 @@ pub fn emit_arbiter_timeout_penalty_applied(e: &Env, arbiter: Address, total_tim
     .publish(e);
 }
 
-pub fn emit_resolution_cooling_off(
-    e: &Env,
-    escrow_id: u32,
-    buyer_percent: u32,
-    arbiter: Address,
-    cooling_off_ends_at: u64,
-) {
-    ResolutionCoolingOff {
-        escrow_id,
-        buyer_percent,
-        arbiter,
-        cooling_off_ends_at,
-    }
-    .publish(e);
+// #215: Time-locked escrow events
+pub fn emit_timelocked_escrow_created(e: &Env, escrow_id: u32, unlock_at: u64, beneficiary: Address) {
+    e.events().publish((Symbol::new(e, "TLEscrowCreated"),), (escrow_id, unlock_at, beneficiary));
 }
-
-pub fn emit_resolution_flagged(e: &Env, escrow_id: u32, flagger: Address, reason_hash: BytesN<32>) {
-    ResolutionFlagged {
-        escrow_id,
-        flagger,
-        reason_hash,
-    }
-    .publish(e);
+pub fn emit_timelocked_funds_claimed(e: &Env, escrow_id: u32, beneficiary: Address, amount: i128) {
+    e.events().publish((Symbol::new(e, "TLFundsClaimed"),), (escrow_id, beneficiary, amount));
 }
-
-pub fn emit_resolution_finalized(e: &Env, escrow_id: u32, buyer_percent: u32, finalized_by: Address) {
-    ResolutionFinalized {
-        escrow_id,
-        buyer_percent,
-        finalized_by,
-    }
-    .publish(e);
+pub fn emit_timelocked_escrow_cancelled(e: &Env, escrow_id: u32, buyer: Address) {
+    e.events().publish((Symbol::new(e, "TLEscrowCancelled"),), (escrow_id, buyer));
 }

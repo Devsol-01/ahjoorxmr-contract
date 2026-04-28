@@ -97,6 +97,7 @@ pub enum ProposalType {
     RuleChange = 1,
     MemberRemoval = 2,
     MaxMembersUpdate = 3,
+    Reinstatement = 4, // #218
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,9 +234,18 @@ pub enum DataKey2 {
     DissolutionVotes,        // Map<(u32, Address), bool> — (round, voter)
     DissolutionVoteCount,    // Map<u32, i128> — (round, votes_for)
     DissolutionDeadline,     // Map<u32, u64> — (round, deadline)
-    // Waitlist
-    Waitlist,                // Vec<(Address, u64)> — (address, joined_at)
-    CatchUpDebt,             // Map<Address, i128> — pending catch-up amounts
+    // #213: Payout Slot Swap
+    SlotSwapCounter,
+    SlotSwaps,               // Map<u32, SlotSwap>
+    SlotSwapRequiresAdmin,   // bool
+    SlotSwapExpirySeconds,   // u64
+    // #214: Insurance Coverage
+    InsuranceCoverageMode,   // InsuranceCoverageMode
+    InsuranceClaims,         // Map<u32, Vec<InsuranceClaim>>
+    // #218: Reinstatement
+    ReinstatementFee,        // i128
+    PendingReinstatementFee, // Vec<Address>
+    ActiveReinstatementProposal, // Map<Address, u32>
 }
 
 /// Persistent storage keys — kept separate because DataKey was hitting
@@ -307,4 +317,46 @@ pub enum GroupStatus {
 pub struct DissolutionConfig {
     pub dissolution_quorum_bps: u32,    // e.g., 7500 = 75%
     pub dissolution_vote_window_seconds: u64,
+}
+
+// #213: Payout Slot Swap
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum SlotSwapStatus {
+    Pending = 0,
+    Accepted = 1,
+    Rejected = 2,
+    Executed = 3,
+    Expired = 4,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlotSwap {
+    pub id: u32,
+    pub initiator: Address,
+    pub counterparty: Address,
+    pub round_a: u32,
+    pub round_b: u32,
+    pub status: SlotSwapStatus,
+    pub created_at: u64,
+    pub expiry_at: u64,
+    pub admin_approved: bool,
+}
+
+// #214: Insurance Coverage Mode & Claims
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum InsuranceCoverageMode {
+    None = 0,
+    Partial = 1,
+    Full = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InsuranceClaim {
+    pub round: u32,
+    pub defaulter: Address,
+    pub amount_covered: i128,
 }

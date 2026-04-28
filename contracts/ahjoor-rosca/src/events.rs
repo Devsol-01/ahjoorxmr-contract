@@ -1009,37 +1009,41 @@ pub fn emit_dissolution_config_updated(e: &Env, dissolution_quorum_bps: u32, vot
     DissolutionConfigUpdated { dissolution_quorum_bps, vote_window_seconds }.publish(e);
 }
 
-// --- Waitlist Events ---
-
-/// Event: Address joined the waitlist
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct WaitlistUpdated {
-    pub address: Address,
-    pub joined: bool, // true = joined, false = removed
-    pub waitlist_size: u32,
+// #213: Slot Swap Events
+pub fn emit_slot_swap_requested(e: &Env, swap_id: u32, initiator: Address, counterparty: Address, round_a: u32, round_b: u32) {
+    e.events().publish((Symbol::new(e, "SlotSwapReq"),), (swap_id, initiator, counterparty, round_a, round_b));
+}
+pub fn emit_slot_swap_accepted(e: &Env, swap_id: u32, counterparty: Address) {
+    e.events().publish((Symbol::new(e, "SlotSwapAcc"),), (swap_id, counterparty));
+}
+pub fn emit_slot_swap_rejected(e: &Env, swap_id: u32, counterparty: Address) {
+    e.events().publish((Symbol::new(e, "SlotSwapRej"),), (swap_id, counterparty));
+}
+pub fn emit_slot_swap_executed(e: &Env, swap_id: u32, round_a: u32, round_b: u32) {
+    e.events().publish((Symbol::new(e, "SlotSwapExec"),), (swap_id, round_a, round_b));
+}
+pub fn emit_slot_swap_expired(e: &Env, swap_id: u32) {
+    e.events().publish((Symbol::new(e, "SlotSwapExp"),), (swap_id,));
 }
 
-/// Event: Waitlisted member auto-enrolled on vacancy
-#[contractevent]
-#[derive(Clone, Debug)]
-pub struct MemberEnrolledFromWaitlist {
-    pub new_member: Address,
-    pub vacated_by: Address,
-    pub round: u32,
-    pub catch_up_amount: i128,
+// #214: Insurance Coverage Events
+pub fn emit_insurance_claim_executed(e: &Env, round: u32, defaulter: Address, amount_covered: i128) {
+    e.events().publish((Symbol::new(e, "InsClaim"),), (round, defaulter, amount_covered));
+}
+pub fn emit_insurance_pool_exhausted(e: &Env, round: u32, shortfall_remaining: i128) {
+    e.events().publish((Symbol::new(e, "InsExhausted"),), (round, shortfall_remaining));
+}
+pub fn emit_insurance_coverage_mode_set(e: &Env, mode: u32) {
+    e.events().publish((Symbol::new(e, "InsModeSet"),), (mode,));
 }
 
-pub fn emit_waitlist_updated(e: &Env, address: Address, joined: bool, waitlist_size: u32) {
-    WaitlistUpdated { address, joined, waitlist_size }.publish(e);
+// #218: Reinstatement Events
+pub fn emit_reinstatement_requested(e: &Env, member: Address, proposal_id: u32) {
+    e.events().publish((Symbol::new(e, "ReinReq"),), (member, proposal_id));
 }
-
-pub fn emit_member_enrolled_from_waitlist(
-    e: &Env,
-    new_member: Address,
-    vacated_by: Address,
-    round: u32,
-    catch_up_amount: i128,
-) {
-    MemberEnrolledFromWaitlist { new_member, vacated_by, round, catch_up_amount }.publish(e);
+pub fn emit_reinstatement_approved(e: &Env, member: Address) {
+    e.events().publish((Symbol::new(e, "ReinApproved"),), (member,));
+}
+pub fn emit_reinstatement_fee_collected(e: &Env, member: Address, amount: i128) {
+    e.events().publish((Symbol::new(e, "ReinFee"),), (member, amount));
 }

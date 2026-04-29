@@ -29,6 +29,8 @@ pub enum EscrowStatus {
     CoolingOff = 7,
     /// Mutual cancellation requested; awaiting counterparty response (#229).
     CancellationPending = 8,
+    /// Seller has proposed a role transfer; buyer has a veto window (#244).
+    AwaitingBuyerVetoDecision = 9,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,6 +273,10 @@ pub enum DataKey {
     MaxTopUpBps,
     /// #225: cumulative top-up amount per escrow
     EscrowToppedUpAmount(u32),
+    /// #244: seller transfer proposal per escrow
+    SellerTransferProposal(u32),
+    /// #244: admin-configurable veto window in ledgers (default: 100)
+    SellerTransferVetoWindow,
     /// #146: (ratee) → (total_score: u64, count: u32) for reputation
     RatingScore(Address),
     /// #146: (escrow_id, rater) → bool — prevents double-rating
@@ -280,6 +286,16 @@ pub enum DataKey {
 const MAX_PROTOCOL_FEE_BPS: u32 = 200; // 2%
 const MAX_ARBITER_FEE_BPS: u32 = 1_000; // 10%
 const DEFAULT_RESOLUTION_COOLING_OFF_SECONDS: u64 = 24 * 60 * 60; // 24 hours
+const DEFAULT_SELLER_TRANSFER_VETO_WINDOW: u32 = 100; // ledgers
+
+/// #244: Pending seller role transfer proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SellerTransferProposal {
+    pub original_seller: Address,
+    pub new_seller: Address,
+    pub veto_deadline: u32, // ledger sequence
+}
 
 /// Verdict recorded by arbiter during cooling-off period.
 #[contracttype]
@@ -4014,6 +4030,30 @@ impl AhjoorEscrowContract {
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found");
 
+        if escrow.buyer != buyer {
+            panic!("Only the buyer can veto");
+        }
+        if escrow.status != EscrowStatus::AwaitingBuyerVetoDecision {
+            panic!("No pending seller transfer");
+        }
+
+        let proposal: SellerTransferProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerTransferProposal(escrow_id))
+            .expect("Proposal not found");
+
+        if env.ledger().sequence() > proposal.veto_deadline {
+            panic!("Veto window has expired");
+        }
+
+        let refund_amount = escrow.amount;
+        escrow.status = EscrowStatus::Refunded;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
         if escrow.status != EscrowStatus::Released && escrow.status != EscrowStatus::Resolved {
             panic!("Rating only allowed after escrow is Released or Resolved");
         }
@@ -4039,6 +4079,46 @@ impl AhjoorEscrowContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        // Refund buyer
+        let token_client = token::Client::new(&env, &escrow.token);
+        token_client.transfer(&env.current_contract_address(), &buyer, &refund_amount);
+
+        events::emit_seller_transfer_vetoed(&env, escrow_id, buyer, refund_amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Buyer explicitly approves the seller transfer, finalising it immediately.
+    pub fn approve_seller_transfer(env: Env, buyer: Address, escrow_id: u32) {
+        buyer.require_auth();
+
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.buyer != buyer {
+            panic!("Only the buyer can approve");
+        }
+        if escrow.status != EscrowStatus::AwaitingBuyerVetoDecision {
+            panic!("No pending seller transfer");
+        }
+
+        let proposal: SellerTransferProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerTransferProposal(escrow_id))
+            .expect("Proposal not found");
+
+        escrow.seller = proposal.new_seller.clone();
+        escrow.status = EscrowStatus::Active;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
         // Accumulate score
         let score_key = DataKey::RatingScore(ratee.clone());
         let (total_score, count): (u64, u32) = env
@@ -4057,6 +4137,7 @@ impl AhjoorEscrowContract {
             PERSISTENT_BUMP_AMOUNT,
         );
 
+        events::emit_seller_transfer_approved(&env, escrow_id, proposal.new_seller);
         events::emit_rating_submitted(&env, escrow_id, rater, ratee, rating, comment_hash);
 
         env.storage()
@@ -4064,6 +4145,43 @@ impl AhjoorEscrowContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// Anyone can call this after the veto window expires to finalise the transfer.
+    pub fn finalize_seller_transfer_if_expired(env: Env, escrow_id: u32) {
+        let mut escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.status != EscrowStatus::AwaitingBuyerVetoDecision {
+            panic!("No pending seller transfer");
+        }
+
+        let proposal: SellerTransferProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerTransferProposal(escrow_id))
+            .expect("Proposal not found");
+
+        if env.ledger().sequence() <= proposal.veto_deadline {
+            panic!("Veto window has not expired yet");
+        }
+
+        escrow.seller = proposal.new_seller.clone();
+        escrow.status = EscrowStatus::Active;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_seller_transfer_expired_approved(&env, escrow_id, proposal.new_seller);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     /// Returns (avg_score_x100, total_ratings) for an address.
     /// avg_score_x100 = (total_score * 100) / count, or 0 if no ratings.
     pub fn get_reputation(env: Env, address: Address) -> (u32, u32) {
@@ -4092,3 +4210,6 @@ mod test_token_whitelist;
 
 #[cfg(test)]
 mod test_cooling_off;
+
+#[cfg(test)]
+mod test_seller_veto;

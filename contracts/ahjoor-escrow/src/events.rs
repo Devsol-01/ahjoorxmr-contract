@@ -802,6 +802,34 @@ pub fn emit_escrow_topped_up(e: &Env, escrow_id: u32, added_amount: i128, new_to
     EscrowToppedUp { escrow_id, added_amount, new_total, buyer }.publish(e);
 }
 
+// #244: Seller Role Transfer Veto Events
+
+pub fn emit_seller_transfer_proposed(e: &Env, escrow_id: u32, original_seller: Address, new_seller: Address, veto_deadline: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SellerTransferProposed"),),
+        (escrow_id, original_seller, new_seller, veto_deadline),
+    );
+}
+
+pub fn emit_seller_transfer_vetoed(e: &Env, escrow_id: u32, buyer: Address, refund_amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SellerTransferVetoed"),),
+        (escrow_id, buyer, refund_amount),
+    );
+}
+
+pub fn emit_seller_transfer_approved(e: &Env, escrow_id: u32, new_seller: Address) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SellerTransferApproved"),),
+        (escrow_id, new_seller),
+    );
+}
+
+pub fn emit_seller_transfer_expired_approved(e: &Env, escrow_id: u32, new_seller: Address) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SellerTransferExpired"),),
+        (escrow_id, new_seller),
+    );
 // --- Issue #146: Post-Resolution Rating System ---
 
 /// Event: Rating submitted after escrow completion

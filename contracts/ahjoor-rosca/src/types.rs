@@ -37,6 +37,8 @@ pub struct RoscaConfig {
     pub fee_recipient: Option<Address>,
     /// Number of consecutive missed rounds before suspension (default: 3)
     pub max_defaults: u32,
+    /// Additional ledgers (time units) before penalties are applied after deadline.
+    pub grace_period_ledgers: u32,
     pub use_timestamp_schedule: bool,
     pub round_duration_seconds: u64,
     pub max_members: Option<u32>,
@@ -264,6 +266,11 @@ pub enum DataKey2 {
     CatchUpDebt,             // Map<Address, i128> — catch-up contributions owed
     StartAt,                 // u64
     GroupActivationEmitted,  // bool
+    Waitlist,                // Vec<(Address, u64)>
+    CatchUpDebt,             // Map<Address, i128>
+    GracePeriodLedgers,      // u32
+    PendingPenalties,        // Map<Address, u32> (member -> round)
+    LastRoundDeadline,       // u64
     // #240: Co-Signer Guarantee
     CoSigners,               // Map<Address, CoSignerRecord> — member → co-signer record
     CoSignerWindowLedgers,   // u32 — grace period ledgers before penalty applied
@@ -445,3 +452,5 @@ pub struct InsuranceClaim {
     pub defaulter: Address,
     pub amount_covered: i128,
 }
+
+

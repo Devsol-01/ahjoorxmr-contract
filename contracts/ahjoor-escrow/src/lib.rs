@@ -29,6 +29,8 @@ pub enum EscrowStatus {
     CoolingOff = 7,
     /// Mutual cancellation requested; awaiting counterparty response (#229).
     CancellationPending = 8,
+    /// #237: Escrow created but awaiting seller collateral deposit before becoming Active.
+    AwaitingCollateral = 9,
     /// Seller has proposed a role transfer; buyer has a veto window (#244).
     AwaitingBuyerVetoDecision = 9,
 }
@@ -118,6 +120,14 @@ pub struct EscrowExtensions {
     pub arbiter_fee_bps: Option<u32>,
     /// Optional per-escrow default winner override for dispute timeout (0 = Buyer, 1 = Seller).
     pub dispute_default_winner: Option<u32>,
+    /// #237: Required seller collateral as bps of escrow amount (0 = no collateral).
+    pub required_collateral_bps: u32,
+    /// #237: Forfeiture bps applied to collateral on buyer-favour dispute resolution.
+    pub collateral_forfeit_bps: u32,
+    /// #237: Ledger timestamp deadline for seller to deposit collateral (0 = not set).
+    pub collateral_deposit_deadline: u64,
+    /// #237: Actual collateral amount deposited by seller.
+    pub collateral_amount: i128,
     /// #241: Optional pre-committed delivery proof hash set by buyer at creation.
     pub delivery_proof_hash: Option<BytesN<32>>,
 }
@@ -275,6 +285,8 @@ pub enum DataKey {
     MaxTopUpBps,
     /// #225: cumulative top-up amount per escrow
     EscrowToppedUpAmount(u32),
+    /// #237: seller collateral amount locked per escrow
+    SellerCollateral(u32),
     /// #241: delivery proof hash submitted by seller (stores proof_hash for event; not the raw proof)
     DeliveryProofSubmitted(u32),
     /// #244: seller transfer proposal per escrow
@@ -653,6 +665,10 @@ impl AhjoorEscrowContract {
                 release_threshold_price,
                 arbiter_fee_bps,
                 dispute_default_winner,
+                required_collateral_bps: 0,
+                collateral_forfeit_bps: 0,
+                collateral_deposit_deadline: 0,
+                collateral_amount: 0,
                 delivery_proof_hash: None,
             },
         };
@@ -803,6 +819,19 @@ impl AhjoorEscrowContract {
         let total = escrow.amount;
 
         Self::transfer_to_sellers(&env, &escrow, total, escrow_id);
+
+        // #237: Return seller collateral on buyer-approved release
+        let collateral: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerCollateral(escrow_id))
+            .unwrap_or(0);
+        if collateral > 0 {
+            let client = token::Client::new(&env, &escrow.token);
+            client.transfer(&env.current_contract_address(), &escrow.seller, &collateral);
+            events::emit_collateral_returned(&env, escrow_id, escrow.seller.clone(), collateral);
+            env.storage().persistent().remove(&DataKey::SellerCollateral(escrow_id));
+        }
 
         escrow.status = EscrowStatus::Released;
 
@@ -1592,6 +1621,33 @@ impl AhjoorEscrowContract {
                 &escrow.seller,
                 &seller_amount,
             );
+        }
+
+        // #237: Handle seller collateral
+        let collateral: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SellerCollateral(escrow_id))
+            .unwrap_or(0);
+        if collateral > 0 {
+            if buyer_percent > 0 {
+                // Buyer-favour: forfeit collateral_forfeit_bps to buyer, return remainder to seller
+                let forfeit = (collateral * escrow.extensions.collateral_forfeit_bps as i128) / 10_000;
+                let returned = collateral - forfeit;
+                if forfeit > 0 {
+                    client.transfer(&env.current_contract_address(), &escrow.buyer, &forfeit);
+                    events::emit_collateral_forfeited(env, escrow_id, forfeit, escrow.buyer.clone());
+                }
+                if returned > 0 {
+                    client.transfer(&env.current_contract_address(), &escrow.seller, &returned);
+                    events::emit_collateral_returned(env, escrow_id, escrow.seller.clone(), returned);
+                }
+            } else {
+                // Seller-favour: return full collateral
+                client.transfer(&env.current_contract_address(), &escrow.seller, &collateral);
+                events::emit_collateral_returned(env, escrow_id, escrow.seller.clone(), collateral);
+            }
+            env.storage().persistent().remove(&DataKey::SellerCollateral(escrow_id));
         }
 
         escrow.status = if buyer_percent == 100 {
@@ -3773,6 +3829,10 @@ impl AhjoorEscrowContract {
                 release_threshold_price: source.extensions.release_threshold_price,
                 arbiter_fee_bps: source.extensions.arbiter_fee_bps,
                 dispute_default_winner: source.extensions.dispute_default_winner,
+                required_collateral_bps: source.extensions.required_collateral_bps,
+                collateral_forfeit_bps: source.extensions.collateral_forfeit_bps,
+                collateral_deposit_deadline: 0,
+                collateral_amount: 0,
                 delivery_proof_hash: source.extensions.delivery_proof_hash.clone(),
             },
         };
@@ -3955,6 +4015,72 @@ impl AhjoorEscrowContract {
         token: Address,
         deadline: u64,
         metadata_hash: Option<BytesN<32>>,
+        required_collateral_bps: u32,
+        collateral_forfeit_bps: u32,
+        collateral_deposit_window: u64,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+        if collateral_forfeit_bps > 10_000 {
+            panic!("collateral_forfeit_bps cannot exceed 10000");
+        }
+        let sellers: Vec<(Address, u32)> = Vec::new(&env);
+        let escrow_id = Self::create_escrow_core(
+            &env,
+            &buyer,
+            EscrowCreateRequest {
+                seller: seller.clone(),
+                arbiter,
+                amount,
+                token: token.clone(),
+                deadline,
+                metadata_hash,
+                sellers,
+                auto_renew: false,
+                renewal_count: 0,
+                buyer_inactivity_secs: 0,
+                min_lock_until: None,
+                release_base: None,
+                release_quote: None,
+                release_comparison: None,
+                release_threshold_price: None,
+                arbiter_fee_bps: None,
+                dispute_default_winner: None,
+            },
+        );
+        if required_collateral_bps > 0 {
+            let mut escrow: Escrow = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Escrow(escrow_id))
+                .expect("Escrow not found");
+            let collateral_amount = (amount as u128 * required_collateral_bps as u128 / 10_000) as i128;
+            let deposit_deadline = env.ledger().timestamp() + collateral_deposit_window;
+            escrow.status = EscrowStatus::AwaitingCollateral;
+            escrow.extensions.required_collateral_bps = required_collateral_bps;
+            escrow.extensions.collateral_forfeit_bps = collateral_forfeit_bps;
+            escrow.extensions.collateral_deposit_deadline = deposit_deadline;
+            escrow.extensions.collateral_amount = collateral_amount;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(escrow_id), &escrow);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Escrow(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        escrow_id
+    }
+
+    /// Seller deposits the required collateral; escrow transitions from AwaitingCollateral to Active.
+    pub fn deposit_collateral(env: Env, seller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        seller.require_auth();
+        let mut escrow: Escrow = env
     ) -> u32 {
         Self::require_not_paused(&env);
         buyer.require_auth();
@@ -4035,6 +4161,27 @@ impl AhjoorEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found");
+        if escrow.seller != seller {
+            panic!("Only seller can deposit collateral");
+        }
+        if escrow.status != EscrowStatus::AwaitingCollateral {
+            panic!("Escrow is not awaiting collateral");
+        }
+        let now = env.ledger().timestamp();
+        if now > escrow.extensions.collateral_deposit_deadline {
+            panic!("Collateral deposit window has expired");
+        }
+        let collateral = escrow.extensions.collateral_amount;
+        let client = token::Client::new(&env, &escrow.token);
+        client.transfer(&seller, &env.current_contract_address(), &collateral);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SellerCollateral(escrow_id), &collateral);
+        env.storage().persistent().extend_ttl(
+            &DataKey::SellerCollateral(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
         if escrow.buyer != buyer {
             panic!("Only buyer can set delivery proof hash");
         }
@@ -4167,6 +4314,10 @@ impl AhjoorEscrowContract {
             .set(&DataKey::Escrow(escrow_id), &escrow);
         env.storage().persistent().extend_ttl(
             &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_collateral_deposited(&env, escrow_id, seller, collateral);
         // Accumulate score
         let score_key = DataKey::RatingScore(ratee.clone());
         let (total_score, count): (u64, u32) = env
@@ -4200,6 +4351,20 @@ impl AhjoorEscrowContract {
             .persistent()
             .get(&DataKey::Escrow(escrow_id))
             .expect("Escrow not found");
+        if escrow.status != EscrowStatus::AwaitingCollateral {
+            panic!("Escrow is not awaiting collateral");
+        }
+        let now = env.ledger().timestamp();
+        if now <= escrow.extensions.collateral_deposit_deadline {
+            panic!("Collateral deposit window has not yet expired");
+        }
+        let client = token::Client::new(&env, &escrow.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &escrow.buyer,
+            &escrow.amount,
+        );
+        escrow.status = EscrowStatus::Refunded;
 
         if escrow.status != EscrowStatus::AwaitingBuyerVetoDecision {
             panic!("No pending seller transfer");
@@ -4225,6 +4390,10 @@ impl AhjoorEscrowContract {
             PERSISTENT_LIFETIME_THRESHOLD,
             PERSISTENT_BUMP_AMOUNT,
         );
+        events::emit_escrow_refunded(&env, escrow_id, escrow.buyer, escrow.amount);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         events::emit_delivery_proof_submitted(&env, escrow_id, seller, computed, true);
         env.storage()

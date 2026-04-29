@@ -802,6 +802,40 @@ pub fn emit_escrow_topped_up(e: &Env, escrow_id: u32, added_amount: i128, new_to
     EscrowToppedUp { escrow_id, added_amount, new_total, buyer }.publish(e);
 }
 
+// --- Issue #237: Seller Performance Collateral ---
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CollateralDeposited {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CollateralForfeited {
+    pub escrow_id: u32,
+    pub amount: i128,
+    pub awarded_to_buyer: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CollateralReturned {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub amount: i128,
+}
+
+pub fn emit_collateral_deposited(e: &Env, escrow_id: u32, seller: Address, amount: i128) {
+    CollateralDeposited { escrow_id, seller, amount }.publish(e);
+}
+pub fn emit_collateral_forfeited(e: &Env, escrow_id: u32, amount: i128, awarded_to_buyer: Address) {
+    CollateralForfeited { escrow_id, amount, awarded_to_buyer }.publish(e);
+}
+pub fn emit_collateral_returned(e: &Env, escrow_id: u32, seller: Address, amount: i128) {
+    CollateralReturned { escrow_id, seller, amount }.publish(e);
 // --- Issue #241: Delivery Proof Hash ---
 
 /// Event: Seller submitted a delivery proof; auto_released indicates if escrow was released.

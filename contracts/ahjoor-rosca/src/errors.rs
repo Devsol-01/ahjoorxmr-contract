@@ -162,4 +162,10 @@ pub enum ExtError {
     CoSignerWindowNotOpen = 76,
     /// Co-signer window has expired.
     CoSignerWindowExpired = 77,
+    /// Group is frozen by contract-level admin pending investigation.
+    GroupFrozen = 72,
+    /// Group is not currently frozen.
+    GroupNotFrozen = 73,
+    /// Snapshot taken too soon; min_snapshot_interval_ledgers not elapsed (#243).
+    SnapshotTooSoon = 72,
 }

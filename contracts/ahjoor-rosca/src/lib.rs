@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Map, String, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec,
 };
 use ahjoor_token_whitelist::TokenWhitelistClient;
 
@@ -673,6 +673,7 @@ impl AhjoorContract {
 
     pub fn contribute(env: Env, contributor: Address, token: Address, amount: i128) {
         internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
         contributor.require_auth();
 
         let start_at = Self::get_start_time(env.clone());
@@ -1138,6 +1139,7 @@ impl AhjoorContract {
 
     pub fn close_round(env: Env) {
         internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -1218,6 +1220,7 @@ impl AhjoorContract {
     /// Admin only. Panics with `DeadlineNotPassed` if called before the deadline.
     pub fn finalize_round(env: Env) {
         internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -1587,6 +1590,7 @@ impl AhjoorContract {
 
     pub fn add_member(env: Env, new_member: Address) {
         internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -1642,6 +1646,7 @@ impl AhjoorContract {
 
     pub fn remove_member(env: Env, member: Address) {
         internals::check_not_paused(&env);
+        internals::check_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -5072,10 +5077,12 @@ impl AhjoorContract {
         proposals.get(proposal_id).expect("Merge proposal not found")
     }
 
-    // ── #240: Co-Signer Guarantee ──────────────────────────────────────────────
+    // ── #236: Group Activity Freeze ────────────────────────────────────────────
 
-    /// Admin configures the co-signer grace window (in ledgers).
-    pub fn set_co_signer_window(env: Env, admin: Address, window_ledgers: u32) {
+    /// Contract-level admin freezes all group activity pending investigation.
+    /// All mutating operations (contribute, close_round, finalize_round,
+    /// add_member, remove_member) are blocked while frozen.
+    pub fn freeze_group(env: Env, admin: Address, group_id: u32, reason_hash: BytesN<32>) {
         admin.require_auth();
         let stored_admin: Address = env
             .storage()
@@ -5088,6 +5095,39 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey2::CoSignerWindowLedgers, &window_ledgers);
+
+        let is_frozen: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IsFrozen)
+            .unwrap_or(false);
+        if is_frozen {
+            panic_with_error!(&env, ExtError::GroupFrozen);
+        }
+
+        env.storage().instance().set(&DataKey2::IsFrozen, &true);
+
+        // Append to immutable freeze log in persistent storage.
+        let mut log: Vec<FreezeRecord> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::FreezeLog)
+            .unwrap_or(Vec::new(&env));
+        log.push_back(FreezeRecord {
+            frozen_at_ledger: env.ledger().sequence(),
+            frozen_by: admin.clone(),
+            reason_hash: reason_hash.clone(),
+            unfrozen_at_ledger: None,
+            resolution_hash: None,
+        });
+        env.storage().persistent().set(&PersistentKey::FreezeLog, &log);
+        env.storage().persistent().extend_ttl(
+            &PersistentKey::FreezeLog,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_group_frozen(&env, group_id, reason_hash, env.ledger().sequence());
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -5121,6 +5161,48 @@ impl AhjoorContract {
         env.storage().instance().set(&DataKey2::CoSigners, &co_signers);
 
         events::emit_co_signer_set(&env, group_id, member, co_signer);
+    /// Contract-level admin unfreezes the group, logging the resolution on-chain.
+    pub fn unfreeze_group(env: Env, admin: Address, group_id: u32, resolution_hash: BytesN<32>) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+
+        let is_frozen: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey2::IsFrozen)
+            .unwrap_or(false);
+        if !is_frozen {
+            panic_with_error!(&env, ExtError::GroupNotFrozen);
+        }
+
+        env.storage().instance().set(&DataKey2::IsFrozen, &false);
+
+        // Update the last freeze record with unfreeze info.
+        let mut log: Vec<FreezeRecord> = env
+            .storage()
+            .persistent()
+            .get(&PersistentKey::FreezeLog)
+            .unwrap_or(Vec::new(&env));
+        let last_idx = log.len() - 1;
+        let mut record = log.get(last_idx).unwrap();
+        record.unfrozen_at_ledger = Some(env.ledger().sequence());
+        record.resolution_hash = Some(resolution_hash.clone());
+        log.set(last_idx, record);
+        env.storage().persistent().set(&PersistentKey::FreezeLog, &log);
+        env.storage().persistent().extend_ttl(
+            &PersistentKey::FreezeLog,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_group_unfrozen(&env, group_id, resolution_hash, env.ledger().sequence());
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -5258,6 +5340,117 @@ impl AhjoorContract {
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
+    /// Returns the freeze log (read-only, available even when frozen).
+    pub fn get_freeze_log(env: Env) -> Vec<FreezeRecord> {
+        env.storage()
+            .persistent()
+            .get(&PersistentKey::FreezeLog)
+            .unwrap_or(Vec::new(&env))
+    }
+    // =========================================================================
+    // #243: On-Chain Group State Snapshot for Immutable Audit
+    // =========================================================================
+
+    /// Admin sets the minimum ledger interval between snapshots (spam guard).
+    pub fn set_min_snapshot_interval(env: Env, admin: Address, interval_ledgers: u32) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+        if admin != stored_admin { panic!("Only admin can set snapshot interval"); }
+
+        env.storage().persistent().set(&PersistentKey::MinSnapshotIntervalLedgers, &interval_ledgers);
+        env.storage().persistent().extend_ttl(&PersistentKey::MinSnapshotIntervalLedgers, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Any member or admin takes a snapshot of the current group state.
+    /// Appends to the append-only SnapshotLog in persistent storage.
+    pub fn take_snapshot(env: Env, caller: Address) -> u32 {
+        internals::check_not_paused(&env);
+        caller.require_auth();
+
+        // Caller must be a member or admin
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
+        let members: Vec<Address> = env.storage().instance().get(&DataKey::Members).unwrap_or(Vec::new(&env));
+        if caller != admin && !members.contains(&caller) {
+            panic_with_error!(&env, Error::OnlyMembersAllowed);
+        }
+
+        // Spam guard
+        let current_ledger = env.ledger().sequence();
+        let last_ledger: u32 = env.storage().persistent().get(&PersistentKey::LastSnapshotLedger).unwrap_or(0);
+        let min_interval: u32 = env.storage().persistent().get(&PersistentKey::MinSnapshotIntervalLedgers).unwrap_or(0);
+        if min_interval > 0 && current_ledger < last_ledger.saturating_add(min_interval) {
+            panic_with_error!(&env, ExtError::SnapshotTooSoon);
+        }
+
+        // Collect current state
+        let current_round: u32 = env.storage().instance().get(&DataKey::CurrentRound).unwrap_or(0);
+        let payout_order: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap_or(Vec::new(&env));
+
+        // Compute pooled balance: sum of member contributions this round
+        let member_contributions: Map<Address, i128> = env.storage().instance().get(&DataKey::MemberContributions).unwrap_or(Map::new(&env));
+        let mut pooled_balance: i128 = 0;
+        for (_, amt) in member_contributions.iter() {
+            pooled_balance = pooled_balance.saturating_add(amt);
+        }
+
+        // Collect member statuses
+        let mut member_statuses: Vec<MemberStatus> = Vec::new(&env);
+        for member in members.iter() {
+            member_statuses.push_back(Self::get_member_status(env.clone(), member));
+        }
+
+        // Compute state_hash: sha256 of round_number || pooled_balance || payout_order XDR
+        let mut preimage = soroban_sdk::Bytes::new(&env);
+        preimage.extend_from_array(&current_round.to_be_bytes());
+        preimage.extend_from_array(&pooled_balance.to_be_bytes());
+        for addr in payout_order.iter() {
+            preimage.append(&addr.to_xdr(&env));
+        }
+        let state_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+
+        // Load existing snapshot log and append
+        let mut log: Vec<GroupSnapshot> = env.storage().persistent().get(&PersistentKey::SnapshotLog).unwrap_or(Vec::new(&env));
+        let snapshot_id = log.len() as u32;
+
+        let snapshot = GroupSnapshot {
+            snapshot_id,
+            taken_at_ledger: current_ledger,
+            taken_by: caller.clone(),
+            round_number: current_round,
+            pooled_balance,
+            member_statuses,
+            payout_order,
+            state_hash: state_hash.clone(),
+        };
+
+        log.push_back(snapshot);
+        env.storage().persistent().set(&PersistentKey::SnapshotLog, &log);
+        env.storage().persistent().extend_ttl(&PersistentKey::SnapshotLog, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        // Update last snapshot ledger
+        env.storage().persistent().set(&PersistentKey::LastSnapshotLedger, &current_ledger);
+        env.storage().persistent().extend_ttl(&PersistentKey::LastSnapshotLedger, PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
+
+        events::emit_snapshot_taken(&env, snapshot_id, caller, state_hash);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        snapshot_id
+    }
+
+    /// Returns a specific snapshot by ID.
+    pub fn get_snapshot(env: Env, snapshot_id: u32) -> GroupSnapshot {
+        let log: Vec<GroupSnapshot> = env.storage().persistent().get(&PersistentKey::SnapshotLog).unwrap_or(Vec::new(&env));
+        log.get(snapshot_id).expect("Snapshot not found")
+    }
+
+    /// Returns the total number of snapshots taken.
+    pub fn get_snapshot_count(env: Env) -> u32 {
+        let log: Vec<GroupSnapshot> = env.storage().persistent().get(&PersistentKey::SnapshotLog).unwrap_or(Vec::new(&env));
+        log.len() as u32
+    }
+
 }
 
 mod test;
@@ -5266,4 +5459,6 @@ mod test_skip;
 mod test_quorum;
 mod test_waitlist;
 mod test_cosigner_guarantee;
+mod test_group_freeze;
+mod test_snapshot;
 pub use events::*;

@@ -32,7 +32,7 @@ mod test_weighted_voting;
 mod test_reinvest;
 mod test_token_whitelist;
 mod test_slot_auction;
-mod test_migration;
+// mod test_migration;  // TODO: File not found - needs to be created
 mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 

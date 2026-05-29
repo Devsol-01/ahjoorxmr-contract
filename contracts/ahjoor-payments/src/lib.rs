@@ -92,6 +92,12 @@ const IDEMPOTENCY_KEY_BUMP_AMOUNT: u32 = 17_280;
 const DEFAULT_MIN_COLLATERAL: i128 = 1_000_000; // 1 USDC (7 decimals)
 /// Default maximum tip: 3000 bps = 30% of base payment amount (#265)
 const DEFAULT_MAX_TIP_BPS: u32 = 3_000;
+/// Default evidence submission window: 7 days in ledgers (~120,960 ledgers at 5s/ledger) (#308)
+const DEFAULT_EVIDENCE_WINDOW_LEDGERS: u32 = 120_960;
+/// Maximum evidence submissions per party (#308)
+const MAX_EVIDENCE_SUBMISSIONS: u32 = 5;
+/// Default cooling-off period: 0 ledgers (disabled by default) (#309)
+const DEFAULT_MAX_COOLING_OFF_LEDGERS: u32 = 0;
 /// Default maximum additional ledgers per extension (≈30 days at 5s/ledger)
 const DEFAULT_MAX_EXTENSION_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5;
 /// Default maximum number of extensions per payment
@@ -134,6 +140,16 @@ pub enum Error {
     TippingNotEnabled = 18,
     /// Tip amount exceeds the admin-configured maximum tip bps of the base amount (#265)
     TipExceedsMaxBps = 19,
+    /// Evidence submission window has closed (#308)
+    EvidenceWindowClosed = 25,
+    /// Evidence submission limit reached for this party (#308)
+    EvidenceLimitReached = 26,
+    /// Cooling-off period has expired (#309)
+    CoolingOffExpired = 27,
+    /// Payment not in cooling-off status (#309)
+    NotInCoolingOff = 28,
+    /// Cooling-off period exceeds maximum allowed (#309)
+    CoolingOffExceedsMax = 29,
     /// KYB verification required but merchant not verified (#310)
     KYBVerificationRequired = 25,
     /// retry_failed_debit called before back-off interval has elapsed (#329)
@@ -261,6 +277,10 @@ pub enum PaymentStatus {
     ScheduledPending = 6,
     /// Awaiting M-of-N multi-sig approval before proceeding.
     PendingApproval = 7,
+    /// Payment completed; in cooling-off window before final settlement (#309)
+    CoolingOff = 8,
+    /// Payment cancelled during cooling-off period (#309)
+    CancelledInCoolingOff = 9,
 }
 
 #[contracttype]
@@ -391,6 +411,25 @@ pub struct Dispute {
     pub reason: String,
     pub created_at: u64,
     pub resolved: bool,
+}
+
+/// Evidence submission record for a dispute (#308)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeEvidenceRecord {
+    pub payment_id: u32,
+    pub customer_evidence: Vec<(BytesN<32>, u64)>, // (hash, submission_ledger)
+    pub merchant_evidence: Vec<(BytesN<32>, u64)>, // (hash, submission_ledger)
+    pub evidence_window_close_ledger: u32,
+    pub resolution_note_hash: Option<BytesN<32>>,
+}
+
+/// Cooling-off configuration for a payment (#309)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoolingOffConfig {
+    pub cooling_off_ledgers: u32,
+    pub cooling_off_expiry_ledger: u32,
 }
 
 /// Default payment timeout: 7 days in seconds.
@@ -702,6 +741,16 @@ pub enum DataKey2 {
     RecurringInvoice(u32),
     /// #265: maximum tip as basis points of the base payment amount (instance storage)
     MaxTipBps,
+    /// Instance: evidence submission window in ledgers (#308)
+    EvidenceWindowLedgers,
+    /// Instance: maximum evidence submissions per party (#308)
+    MaxEvidenceSubmissions,
+    /// Persistent: dispute evidence record for a payment (#308)
+    DisputeEvidence(u32),
+    /// Instance: maximum cooling-off period in ledgers (#309)
+    MaxCoolingOffLedgers,
+    /// Persistent: cooling-off configuration for a payment (#309)
+    CoolingOffConfig(u32),
     /// Persistent: merchant KYB verification record (#310)
     MerchantKYB(Address),
     /// Instance: KYB enforcement flag (#310)
@@ -1567,7 +1616,317 @@ impl AhjoorPaymentsContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
-    /// Check if a dispute has exceeded the timeout window.
+    /// Submit evidence hash for a dispute (#308)
+    pub fn submit_dispute_evidence(
+        env: Env,
+        payment_id: u32,
+        evidence_hash: BytesN<32>,
+        evidence_type: Symbol,
+    ) {
+        Self::require_not_paused(&env);
+        let caller = env.invoker();
+
+        let payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.status != PaymentStatus::Disputed {
+            panic_with_error!(&env, Error::EvidenceWindowClosed);
+        }
+
+        // Check if caller is customer or merchant
+        let is_customer = payment.customer == caller;
+        let is_merchant = payment.merchant == caller;
+        if !is_customer && !is_merchant {
+            panic!("Only customer or merchant can submit evidence");
+        }
+
+        // Get or create evidence record
+        let mut evidence_record: DisputeEvidenceRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::DisputeEvidence(payment_id))
+            .unwrap_or(DisputeEvidenceRecord {
+                payment_id,
+                customer_evidence: Vec::new(&env),
+                merchant_evidence: Vec::new(&env),
+                evidence_window_close_ledger: env.ledger().sequence() + Self::get_evidence_window_ledgers(&env),
+                resolution_note_hash: None,
+            });
+
+        // Check if evidence window is still open
+        if env.ledger().sequence() >= evidence_record.evidence_window_close_ledger {
+            panic_with_error!(&env, Error::EvidenceWindowClosed);
+        }
+
+        let max_submissions = Self::get_max_evidence_submissions(&env);
+        let current_ledger = env.ledger().sequence();
+
+        if is_customer {
+            if evidence_record.customer_evidence.len() >= max_submissions as usize {
+                panic_with_error!(&env, Error::EvidenceLimitReached);
+            }
+            evidence_record.customer_evidence.push_back((evidence_hash, current_ledger as u64));
+        } else {
+            if evidence_record.merchant_evidence.len() >= max_submissions as usize {
+                panic_with_error!(&env, Error::EvidenceLimitReached);
+            }
+            evidence_record.merchant_evidence.push_back((evidence_hash, current_ledger as u64));
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::DisputeEvidence(payment_id), &evidence_record);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::DisputeEvidence(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_dispute_evidence_submitted(&env, payment_id, caller, evidence_hash, evidence_type);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Close evidence submission window for a dispute (#308)
+    pub fn close_evidence_window(env: Env, payment_id: u32) {
+        Self::require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let mut evidence_record: DisputeEvidenceRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::DisputeEvidence(payment_id))
+            .expect("No evidence record found");
+
+        evidence_record.evidence_window_close_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::DisputeEvidence(payment_id), &evidence_record);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::DisputeEvidence(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_evidence_window_closed(&env, payment_id);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get dispute evidence record (#308)
+    pub fn get_dispute_evidence(env: Env, payment_id: u32) -> DisputeEvidenceRecord {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::DisputeEvidence(payment_id))
+            .expect("No evidence record found")
+    }
+
+    /// Resolve dispute with evidence hash (#308)
+    pub fn resolve_dispute_with_evidence(
+        env: Env,
+        payment_id: u32,
+        winner: bool, // true = merchant, false = customer
+        resolution_note_hash: BytesN<32>,
+    ) {
+        Self::require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let mut evidence_record: DisputeEvidenceRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::DisputeEvidence(payment_id))
+            .expect("No evidence record found");
+
+        evidence_record.resolution_note_hash = Some(resolution_note_hash);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::DisputeEvidence(payment_id), &evidence_record);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::DisputeEvidence(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Resolve the underlying dispute
+        Self::resolve_dispute(env, payment_id, winner);
+    }
+
+    /// Create payment with cooling-off period (#309)
+    pub fn create_payment_with_cooling_off(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        cooling_off_ledgers: u32,
+    ) -> u32 {
+        // Validate cooling-off period
+        let max_cooling_off = Self::get_max_cooling_off_ledgers(&env);
+        if cooling_off_ledgers > max_cooling_off && max_cooling_off > 0 {
+            panic_with_error!(&env, Error::CoolingOffExceedsMax);
+        }
+
+        // Create payment normally
+        let payment_id = Self::create_payment(env.clone(), customer.clone(), merchant, amount, token);
+
+        // Store cooling-off config if enabled
+        if cooling_off_ledgers > 0 {
+            let cooling_off_config = CoolingOffConfig {
+                cooling_off_ledgers,
+                cooling_off_expiry_ledger: 0, // Will be set on completion
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey2::CoolingOffConfig(payment_id), &cooling_off_config);
+            env.storage().persistent().extend_ttl(
+                &DataKey2::CoolingOffConfig(payment_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+
+        payment_id
+    }
+
+    /// Cancel payment during cooling-off period (#309)
+    pub fn cancel_during_cooling_off(env: Env, payment_id: u32) {
+        Self::require_not_paused(&env);
+        let customer: Address = env.invoker();
+
+        let mut payment: Payment = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payment(payment_id))
+            .expect("Payment not found");
+
+        if payment.customer != customer {
+            panic!("Only the payment customer can cancel");
+        }
+
+        if payment.status != PaymentStatus::CoolingOff {
+            panic_with_error!(&env, Error::NotInCoolingOff);
+        }
+
+        let cooling_off_config: CoolingOffConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::CoolingOffConfig(payment_id))
+            .expect("No cooling-off config found");
+
+        if env.ledger().sequence() >= cooling_off_config.cooling_off_expiry_ledger {
+            panic_with_error!(&env, Error::CoolingOffExpired);
+        }
+
+        // Refund full amount to customer
+        let client = token::Client::new(&env, &payment.token);
+        client.transfer(
+            &env.current_contract_address(),
+            &customer,
+            &payment.amount,
+        );
+
+        payment.status = PaymentStatus::CancelledInCoolingOff;
+        payment.refunded_amount = payment.amount;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Payment(payment_id), &payment);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Payment(payment_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_cooling_off_cancellation(&env, payment_id, customer, payment.amount);
+        events::emit_payment_status_changed(
+            &env,
+            payment_id,
+            PaymentStatus::CoolingOff,
+            PaymentStatus::CancelledInCoolingOff,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Set evidence window in ledgers (#308)
+    pub fn set_evidence_window_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey2::EvidenceWindowLedgers, &ledgers);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get evidence window in ledgers (#308)
+    pub fn get_evidence_window_ledgers(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::EvidenceWindowLedgers)
+            .unwrap_or(DEFAULT_EVIDENCE_WINDOW_LEDGERS)
+    }
+
+    /// Set max evidence submissions per party (#308)
+    pub fn set_max_evidence_submissions(env: Env, admin: Address, max_submissions: u32) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey2::MaxEvidenceSubmissions, &max_submissions);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get max evidence submissions per party (#308)
+    pub fn get_max_evidence_submissions(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::MaxEvidenceSubmissions)
+            .unwrap_or(MAX_EVIDENCE_SUBMISSIONS)
+    }
+
+    /// Set max cooling-off period in ledgers (#309)
+    pub fn set_max_cooling_off_ledgers(env: Env, admin: Address, max_ledgers: u32) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey2::MaxCoolingOffLedgers, &max_ledgers);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get max cooling-off period in ledgers (#309)
+    pub fn get_max_cooling_off_ledgers(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::MaxCoolingOffLedgers)
+            .unwrap_or(DEFAULT_MAX_COOLING_OFF_LEDGERS)
+    }
+
+    /// Check if escalation timeout reached
     pub fn check_escalation(env: Env, payment_id: u32) -> bool {
         let payment: Payment = env
             .storage()
@@ -5072,7 +5431,38 @@ impl AhjoorPaymentsContract {
         }
 
         let old_status = payment.status;
-        payment.status = PaymentStatus::Completed;
+        
+        // Check if cooling-off is enabled for this payment (#309)
+        let cooling_off_config: Option<CoolingOffConfig> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::CoolingOffConfig(payment_id));
+        
+        if let Some(mut config) = cooling_off_config {
+            if config.cooling_off_ledgers > 0 {
+                // Set status to CoolingOff instead of Completed
+                payment.status = PaymentStatus::CoolingOff;
+                config.cooling_off_expiry_ledger = env.ledger().sequence() + config.cooling_off_ledgers;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey2::CoolingOffConfig(payment_id), &config);
+                env.storage().persistent().extend_ttl(
+                    &DataKey2::CoolingOffConfig(payment_id),
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+                events::emit_payment_in_cooling_off(
+                    env,
+                    payment_id,
+                    payment.customer.clone(),
+                    config.cooling_off_expiry_ledger,
+                );
+            } else {
+                payment.status = PaymentStatus::Completed;
+            }
+        } else {
+            payment.status = PaymentStatus::Completed;
+        }
         let original_amount = payment.amount;
         payment.amount = net_amount;
         let completed_at = env.ledger().timestamp();

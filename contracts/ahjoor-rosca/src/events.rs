@@ -1503,3 +1503,72 @@ pub fn emit_treasury_payment_executed(env: &Env, recipient: Address, amount: i12
         TreasuryPaymentExecuted { group_id: 0, recipient, amount },
     );
 }
+
+// --- Emergency Liquidity Reserve Events (#313) ---
+
+/// Event: Emergency loan granted
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EmergencyLoanGranted {
+    pub group_id: u32,
+    pub member: Address,
+    pub loan_id: u32,
+    pub amount: i128,
+    pub repayment_deadline: u32,
+}
+
+/// Event: Emergency loan repaid
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EmergencyLoanRepaid {
+    pub group_id: u32,
+    pub loan_id: u32,
+    pub amount: i128,
+    pub remaining: i128,
+}
+
+/// Event: Loan default deducted from payout
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LoanDefaultDeducted {
+    pub group_id: u32,
+    pub loan_id: u32,
+    pub deducted_from_payout: i128,
+}
+
+pub fn emit_emergency_loan_granted(
+    e: &Env,
+    group_id: u32,
+    member: Address,
+    loan_id: u32,
+    amount: i128,
+    repayment_deadline: u32,
+) {
+    EmergencyLoanGranted {
+        group_id,
+        member,
+        loan_id,
+        amount,
+        repayment_deadline,
+    }
+    .publish(e);
+}
+
+pub fn emit_emergency_loan_repaid(e: &Env, group_id: u32, loan_id: u32, amount: i128, remaining: i128) {
+    EmergencyLoanRepaid {
+        group_id,
+        loan_id,
+        amount,
+        remaining,
+    }
+    .publish(e);
+}
+
+pub fn emit_loan_default_deducted(e: &Env, group_id: u32, loan_id: u32, deducted_from_payout: i128) {
+    LoanDefaultDeducted {
+        group_id,
+        loan_id,
+        deducted_from_payout,
+    }
+    .publish(e);
+}

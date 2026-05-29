@@ -1354,3 +1354,89 @@ pub fn emit_payment_indexed_by_external_id(e: &Env, payment_id: u32, ext_id: sor
         (payment_id, ext_id),
     );
 }
+
+// --- Dispute Evidence Events (#308) ---
+
+/// Event: Evidence submitted for a dispute
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DisputeEvidenceSubmitted {
+    pub payment_id: u32,
+    pub submitter: Address,
+    pub evidence_hash: BytesN<32>,
+    pub evidence_type: Symbol,
+}
+
+/// Event: Evidence submission window closed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EvidenceWindowClosed {
+    pub payment_id: u32,
+}
+
+pub fn emit_dispute_evidence_submitted(
+    e: &Env,
+    payment_id: u32,
+    submitter: Address,
+    evidence_hash: BytesN<32>,
+    evidence_type: Symbol,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "DispEvidSubmit"),),
+        DisputeEvidenceSubmitted {
+            payment_id,
+            submitter,
+            evidence_hash,
+            evidence_type,
+        },
+    );
+}
+
+pub fn emit_evidence_window_closed(e: &Env, payment_id: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "EvidWinClose"),),
+        EvidenceWindowClosed { payment_id },
+    );
+}
+
+// --- Cooling-Off Events (#309) ---
+
+/// Event: Payment entered cooling-off period
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentInCoolingOff {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub expiry_ledger: u32,
+}
+
+/// Event: Payment cancelled during cooling-off period
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoolingOffCancellation {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub refund_amount: i128,
+}
+
+pub fn emit_payment_in_cooling_off(e: &Env, payment_id: u32, customer: Address, expiry_ledger: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "PmtCoolOff"),),
+        PaymentInCoolingOff {
+            payment_id,
+            customer,
+            expiry_ledger,
+        },
+    );
+}
+
+pub fn emit_cooling_off_cancellation(e: &Env, payment_id: u32, customer: Address, refund_amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "CoolOffCancel"),),
+        CoolingOffCancellation {
+            payment_id,
+            customer,
+            refund_amount,
+        },
+    );
+}

@@ -173,6 +173,42 @@ pub struct PaymentCaptured {
     pub amount: i128,
 }
 
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerBlocked {
+    pub merchant: Address,
+    pub customer: Address,
+    pub reason_code: Symbol,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UnblockRequested {
+    pub request_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerUnblocked {
+    pub merchant: Address,
+    pub customer: Address,
+    pub unblocked_by: Address,
+}
+
+pub fn emit_customer_blocked(e: &Env, merchant: Address, customer: Address, reason: Symbol) {
+    CustomerBlocked { merchant, customer, reason }.publish(e);
+}
+
+pub fn emit_unblock_requested(e: &Env, request_id: u32, merchant: Address, customer: Address) {
+    UnblockRequested { request_id, merchant, customer }.publish(e);
+}
+
+pub fn emit_customer_unblocked(e: &Env, merchant: Address, customer: Address, by: Address) {
+    CustomerUnblocked { merchant, customer, unblocked_by: by }.publish(e);
+}
+
 /// Event: Partial refund issued on a pending/disputed payment
 #[contractevent]
 #[derive(Clone, Debug)]

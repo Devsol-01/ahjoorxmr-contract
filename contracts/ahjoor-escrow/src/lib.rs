@@ -125,6 +125,14 @@ pub struct Escrow {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowReceipt {
+    pub receipt_id: u32,
+    pub escrow_id: u32,
+    pub holder: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscrowExtensions {
     pub auto_renew: bool,
     pub renewal_count: u32,
@@ -280,11 +288,17 @@ pub struct EscrowBatchConfig {
 pub enum DataKey {
     Admin,
     ContractVersion,
+    /// Counter for receipt IDs
+    EscrowReceiptCounter,
     MigrationCompleted(u32),
     Paused,
     PauseReason,
     EscrowCounter,
     Escrow(u32),
+    /// receipt_id -> EscrowReceipt
+    EscrowReceipt(u32),
+    /// escrow_id -> receipt_id
+    EscrowReceiptByEscrow(u32),
     Dispute(u32),
     DeadlineProposal(u32),
     AllowedToken(Address),
@@ -1093,6 +1107,26 @@ impl AhjoorEscrowContract {
             events::emit_escrow_time_locked(env, escrow_id, lock_until);
         }
 
+        // Mint EscrowReceipt assigned to primary seller
+        let receipt_id = Self::next_receipt_id(env);
+        let receipt = EscrowReceipt {
+            receipt_id,
+            escrow_id,
+            holder: primary_seller.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowReceipt(receipt_id), &receipt);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowReceiptByEscrow(escrow_id), &receipt_id);
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowReceipt(receipt_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_escrow_receipt_minted(env, receipt_id, escrow_id, primary_seller);
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -1154,6 +1188,48 @@ impl AhjoorEscrowContract {
         escrow_id
     }
 
+    /// Transfer an escrow receipt to a new holder. Only current holder may transfer.
+    pub fn transfer_escrow_receipt(env: Env, caller: Address, receipt_id: u32, new_holder: Address) {
+        Self::require_not_paused(&env);
+        caller.require_auth();
+
+        let mut receipt: EscrowReceipt = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowReceipt(receipt_id))
+            .expect("Receipt not found");
+
+        if caller != receipt.holder {
+            panic!("Only current holder can transfer receipt");
+        }
+
+        // Block transfers for milestone escrows or pending partial releases
+        if env.storage().persistent().has(&DataKey::EscrowMilestones(receipt.escrow_id)) {
+            panic!("ActiveMilestoneInProgress");
+        }
+        if env.storage().persistent().has(&DataKey::PendingPartialRelease(receipt.escrow_id)) {
+            panic!("ActiveMilestoneInProgress");
+        }
+
+        let old = receipt.holder.clone();
+        receipt.holder = new_holder.clone();
+        env.storage().persistent().set(&DataKey::EscrowReceipt(receipt_id), &receipt);
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowReceipt(receipt_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_escrow_receipt_transferred(&env, receipt_id, old, new_holder);
+    }
+
+    /// Read the escrow receipt for an escrow, if any.
+    pub fn get_escrow_receipt(env: Env, escrow_id: u32) -> Option<EscrowReceipt> {
+        if let Some(receipt_id) = env.storage().persistent().get::<_, u32>(&DataKey::EscrowReceiptByEscrow(escrow_id)) {
+            return env.storage().persistent().get(&DataKey::EscrowReceipt(receipt_id));
+        }
+        None
+    }
+
     /// Release escrowed funds to seller. Can be called by buyer or arbiter.
     pub fn release_escrow(env: Env, caller: Address, escrow_id: u32) {
         Self::require_not_paused(&env);
@@ -1207,6 +1283,9 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Released;
+
+        // Burn associated receipt atomically on release
+        Self::burn_receipt_if_exists(&env, escrow_id);
 
         env.storage()
             .persistent()
@@ -1797,7 +1876,8 @@ impl AhjoorEscrowContract {
         }
 
         let client = token::Client::new(&env, &escrow.token);
-        client.transfer(&env.current_contract_address(), &escrow.seller, &milestone.amount);
+        let recipient = Self::get_receipt_holder(&env, escrow_id).unwrap_or(escrow.seller.clone());
+        client.transfer(&env.current_contract_address(), &recipient, &milestone.amount);
 
         let amount_released = milestone.amount;
         milestone.status = MilestoneStatus::Approved;
@@ -1826,6 +1906,8 @@ impl AhjoorEscrowContract {
         }
         if all_terminal && any_approved && escrow.status == EscrowStatus::Active {
             escrow.status = EscrowStatus::Released;
+            // Burn receipt when milestones complete and escrow releases
+            Self::burn_receipt_if_exists(&env, escrow_id);
             env.storage()
                 .persistent()
                 .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -2543,6 +2625,9 @@ impl AhjoorEscrowContract {
             escrow.status = EscrowStatus::Refunded;
         }
 
+        // Burn any receipt in either case
+        Self::burn_receipt_if_exists(&env, escrow_id);
+
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -2956,6 +3041,8 @@ impl AhjoorEscrowContract {
         );
 
         escrow.status = EscrowStatus::Refunded;
+        // Burn associated receipt on refund
+        Self::burn_receipt_if_exists(&env, escrow_id);
 
         env.storage()
             .persistent()
@@ -4574,6 +4661,8 @@ impl AhjoorEscrowContract {
         }
 
         escrow.status = EscrowStatus::Refunded;
+        // Burn any associated receipt on cancellation accepted
+        Self::burn_receipt_if_exists(&env, escrow_id);
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
@@ -4750,8 +4839,10 @@ impl AhjoorEscrowContract {
     fn transfer_to_sellers(env: &Env, escrow: &Escrow, total: i128, escrow_id: u32) {
         let client = token::Client::new(env, &escrow.token);
         if escrow.sellers.len() <= 1 {
-            client.transfer(&env.current_contract_address(), &escrow.seller, &total);
-            events::emit_escrow_released(env, escrow_id, escrow.seller.clone(), total);
+            // Pay current receipt holder if present, otherwise seller
+            let recipient = Self::get_receipt_holder(env, escrow_id).unwrap_or(escrow.seller.clone());
+            client.transfer(&env.current_contract_address(), &recipient, &total);
+            events::emit_escrow_released(env, escrow_id, recipient.clone(), total);
             return;
         }
 
@@ -4856,6 +4947,39 @@ impl AhjoorEscrowContract {
             .instance()
             .set(&DataKey::EscrowCounter, &counter);
         id
+    }
+
+    fn next_receipt_id(env: &Env) -> u32 {
+        let mut counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowReceiptCounter)
+            .unwrap_or(0);
+        let id = counter;
+        counter += 1;
+        env.storage()
+            .instance()
+            .set(&DataKey::EscrowReceiptCounter, &counter);
+        id
+    }
+
+    fn get_receipt_holder(env: &Env, escrow_id: u32) -> Option<Address> {
+        if let Some(receipt_id) = env.storage().persistent().get::<_, u32>(&DataKey::EscrowReceiptByEscrow(escrow_id)) {
+            if let Some(receipt) = env.storage().persistent().get::<_, EscrowReceipt>(&DataKey::EscrowReceipt(receipt_id)) {
+                return Some(receipt.holder);
+            }
+        }
+        None
+    }
+
+    fn burn_receipt_if_exists(env: &Env, escrow_id: u32) {
+        if let Some(receipt_id) = env.storage().persistent().get::<_, u32>(&DataKey::EscrowReceiptByEscrow(escrow_id)) {
+            if let Some(receipt) = env.storage().persistent().get::<_, EscrowReceipt>(&DataKey::EscrowReceipt(receipt_id)) {
+                env.storage().persistent().remove(&DataKey::EscrowReceipt(receipt_id));
+                env.storage().persistent().remove(&DataKey::EscrowReceiptByEscrow(escrow_id));
+                events::emit_escrow_receipt_burned(env, receipt.receipt_id, escrow_id);
+            }
+        }
     }
 
     fn try_auto_renew(env: &Env, old_escrow_id: u32, source: &Escrow) {

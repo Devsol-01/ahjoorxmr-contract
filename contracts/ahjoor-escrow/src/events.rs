@@ -367,6 +367,54 @@ pub fn emit_escrow_released(e: &Env, escrow_id: u32, seller: Address, amount: i1
     .publish(e);
 }
 
+/// Event: Escrow receipt minted and assigned to seller
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptMinted {
+    pub receipt_id: u32,
+    pub escrow_id: u32,
+    pub seller: Address,
+}
+
+/// Event: Escrow receipt transferred to new holder
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptTransferred {
+    pub receipt_id: u32,
+    pub from: Address,
+    pub to: Address,
+}
+
+/// Event: Escrow receipt burned (on release or cancel)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptBurned {
+    pub receipt_id: u32,
+    pub escrow_id: u32,
+}
+
+pub fn emit_escrow_receipt_minted(e: &Env, receipt_id: u32, escrow_id: u32, seller: Address) {
+    EscrowReceiptMinted {
+        receipt_id,
+        escrow_id,
+        seller,
+    }
+    .publish(e);
+}
+
+pub fn emit_escrow_receipt_transferred(e: &Env, receipt_id: u32, from: Address, to: Address) {
+    EscrowReceiptTransferred {
+        receipt_id,
+        from,
+        to,
+    }
+    .publish(e);
+}
+
+pub fn emit_escrow_receipt_burned(e: &Env, receipt_id: u32, escrow_id: u32) {
+    EscrowReceiptBurned { receipt_id, escrow_id }.publish(e);
+}
+
 pub fn emit_partial_released(
     e: &Env,
     escrow_id: u32,

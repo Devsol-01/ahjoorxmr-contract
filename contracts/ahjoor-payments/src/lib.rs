@@ -522,6 +522,46 @@ pub struct DynamicPayment {
     pub expiry: u64,
 }
 
+/// Installment payment plan record.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentPlan {
+    /// Unique identifier for the plan.
+    pub plan_id: u32,
+    /// Customer address.
+    pub customer: Address,
+    /// Merchant address.
+    pub merchant: Address,
+    /// Token address for the payment.
+    pub token: Address,
+    /// Total amount to be paid in installments.
+    pub total_amount: i128,
+    /// Number of installments.
+    pub num_installments: u32,
+    /// Amount per installment (assuming equal installments).
+    pub installment_amount: i128,
+    /// Interval in ledgers between installments.
+    pub interval_ledgers: u32,
+    /// Ledger at which the plan expires if not completed.
+    pub expiry_ledger: u64,
+    /// Ledger at which the next installment is due.
+    pub next_due_ledger: u64,
+    /// Number of installments already paid.
+    pub installments_paid: u32,
+    /// Status of the plan.
+    pub status: PlanStatus,
+}
+
+/// Status of an installment plan.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlanStatus {
+    Active = 0,
+    Paused = 1,
+    Completed = 2,
+    Expired = 3,
+}
+
 /// Per-merchant volume cap configuration (#131)
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -787,6 +827,8 @@ pub enum DataKey2 {
     MaxExtensionLedgers,
     /// Instance: maximum number of extensions per payment
     MaxExtensions,
+    /// Persistent: installment payment plan
+    PaymentPlan(u32),
 }
 
 mod events;

@@ -347,6 +347,40 @@ pub struct PaymentExpiryExtended {
     pub extension_count: u32,
 }
 
+/// Event: Installment plan created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanCreated {
+    pub plan_id: u32,
+    pub customer: Address,
+    pub merchant: Address,
+    pub total_amount: i128,
+    pub num_installments: u32,
+}
+
+/// Event: Installment settled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentSettled {
+    pub plan_id: u32,
+    pub installment_index: u32,
+    pub amount_debited: i128,
+}
+
+/// Event: Installment plan completed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanCompleted {
+    pub plan_id: u32,
+}
+
+/// Event: Installment plan expired.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanExpired {
+    pub plan_id: u32,
+}
+
 // --- Helper Emission Functions ---
 
 pub fn emit_payment_created(

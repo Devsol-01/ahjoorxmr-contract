@@ -1091,3 +1091,31 @@ pub fn emit_cross_contract_refund_registered(
     }
     .publish(e);
 }
+
+// ─── Issue #355: Configurable Abuse Score Decay ───────────────────────────────
+
+/// Event: Abuse score decayed due to elapsed time without new violations
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AbuseScoreDecayed {
+    pub buyer: Address,
+    pub old_score: u32,
+    pub new_score: u32,
+    pub periods_elapsed: u32,
+}
+
+pub fn emit_abuse_score_decayed(
+    e: &Env,
+    buyer: Address,
+    old_score: u32,
+    new_score: u32,
+    periods_elapsed: u32,
+) {
+    AbuseScoreDecayed {
+        buyer,
+        old_score,
+        new_score,
+        periods_elapsed,
+    }
+    .publish(e);
+}

@@ -423,6 +423,20 @@ pub enum DataKey2 {
     MultiPartyThreshold(u32),
     /// #350: set of approver addresses that have already approved release
     ReleaseApprovals(u32),
+    /// #353: ordered release schedule (escrow_id → Vec<ReleaseTranche>)
+    ReleaseSchedule(u32),
+    /// #353: index of the next unclaimed tranche (escrow_id → u32)
+    ReleasedIndex(u32),
+}
+
+/// #353: A single time-locked tranche in a staged release schedule.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReleaseTranche {
+    /// Unix timestamp after which this tranche may be claimed.
+    pub unlock_at: u64,
+    /// Token amount released in this tranche.
+    pub amount: i128,
 }
 
 // ── #332: Milestone BPS Progressive Release ───────────────────────────────────
@@ -5534,6 +5548,221 @@ impl AhjoorEscrowContract {
             .persistent()
             .get(&DataKey2::ReleaseApprovals(escrow_id))
             .unwrap_or(Vec::new(&env))
+    }
+
+    // ── #353: Time-Locked Staged Release ─────────────────────────────────────
+
+    /// Create an escrow with a staged release schedule.
+    ///
+    /// Funds are locked in the contract and released in tranches according to
+    /// `schedule`, where each `ReleaseTranche` specifies an `unlock_at` timestamp
+    /// and an `amount`. The sum of all tranche amounts must equal the total held.
+    ///
+    /// Beneficiary (seller) calls `claim_scheduled_release` after each tranche's
+    /// `unlock_at` to receive that tranche's funds.
+    pub fn create_escrow_with_schedule(
+        env: Env,
+        buyer: Address,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        deadline: u64,
+        schedule: Vec<ReleaseTranche>,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        buyer.require_auth();
+
+        if schedule.is_empty() {
+            panic!("Release schedule must contain at least one tranche");
+        }
+
+        let now = env.ledger().timestamp();
+        let mut total: i128 = 0;
+        for i in 0..schedule.len() {
+            let tranche = schedule.get(i).unwrap();
+            if tranche.amount <= 0 {
+                panic!("Each tranche amount must be positive");
+            }
+            if tranche.unlock_at <= now {
+                panic!("Each tranche unlock_at must be in the future");
+            }
+            total += tranche.amount;
+        }
+
+        let request = EscrowCreateRequest {
+            seller: seller.clone(),
+            arbiter,
+            amount: total,
+            token,
+            deadline,
+            metadata_hash: None,
+            sellers: Vec::new(&env),
+            auto_renew: false,
+            renewal_count: 0,
+            buyer_inactivity_secs: 0,
+            min_lock_until: None,
+            release_base: None,
+            release_quote: None,
+            release_comparison: None,
+            release_threshold_price: None,
+            arbiter_fee_bps: None,
+            dispute_default_winner: None,
+            auto_renew_config: None,
+        };
+
+        let escrow_id = Self::create_escrow_core(&env, &buyer, request);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::ReleaseSchedule(escrow_id), &schedule);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::ReleaseSchedule(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey2::ReleasedIndex(escrow_id), &0u32);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::ReleasedIndex(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        escrow_id
+    }
+
+    /// Claim the next available tranche(s) from a staged release schedule.
+    ///
+    /// Callable by the beneficiary (seller). Iterates from the current
+    /// `ReleasedIndex` and transfers every tranche whose `unlock_at` has elapsed.
+    /// Skips tranches that have already been claimed. Emits
+    /// `ScheduledReleaseExecuted` for each tranche transferred.
+    pub fn claim_scheduled_release(env: Env, beneficiary: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        beneficiary.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.seller != beneficiary {
+            panic!("Only the beneficiary (seller) can claim scheduled releases");
+        }
+
+        if !Self::is_open_escrow_status(escrow.status) && escrow.status != EscrowStatus::PartiallyReleased {
+            panic!("Escrow is not in a claimable state");
+        }
+
+        let schedule: Vec<ReleaseTranche> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::ReleaseSchedule(escrow_id))
+            .expect("No release schedule found for this escrow");
+
+        let mut released_index: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::ReleasedIndex(escrow_id))
+            .unwrap_or(0);
+
+        let now = env.ledger().timestamp();
+        let token_client = token::Client::new(&env, &escrow.token);
+        let mut claimed_any = false;
+        let total_tranches = schedule.len();
+
+        loop {
+            if released_index >= total_tranches {
+                break;
+            }
+            let tranche = schedule.get(released_index).unwrap();
+            if tranche.unlock_at > now {
+                break;
+            }
+
+            token_client.transfer(
+                &env.current_contract_address(),
+                &beneficiary,
+                &tranche.amount,
+            );
+
+            let remaining_tranches = total_tranches - released_index - 1;
+            events::emit_scheduled_release_executed(
+                &env,
+                escrow_id,
+                released_index,
+                tranche.amount,
+                remaining_tranches,
+            );
+
+            released_index += 1;
+            claimed_any = true;
+        }
+
+        if !claimed_any {
+            panic!("No tranches are currently claimable");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::ReleasedIndex(escrow_id), &released_index);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::ReleasedIndex(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // If all tranches have been claimed, mark the escrow as Released
+        if released_index >= total_tranches {
+            let mut updated_escrow = escrow.clone();
+            updated_escrow.status = EscrowStatus::Released;
+            Self::burn_receipt_if_exists(&env, escrow_id);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(escrow_id), &updated_escrow);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Escrow(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        } else {
+            let mut updated_escrow = escrow.clone();
+            updated_escrow.status = EscrowStatus::PartiallyReleased;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(escrow_id), &updated_escrow);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Escrow(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+        }
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Read the release schedule for a staged-release escrow.
+    pub fn get_release_schedule(env: Env, escrow_id: u32) -> Vec<ReleaseTranche> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::ReleaseSchedule(escrow_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Read how many tranches have already been claimed.
+    pub fn get_released_index(env: Env, escrow_id: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::ReleasedIndex(escrow_id))
+            .unwrap_or(0)
     }
 
     // --- Internal Helpers ---

@@ -341,6 +341,10 @@ pub enum DataKey3 {
     SplitProposalCounter,    // u32
     SplitProposals,          // Map<u32, SplitProposal>
     SplitConfirmationWindow, // u32 — ledgers members have to confirm
+    // #356: Penalty-Based Slot Demotion
+    LateContributionCount,   // Map<Address, u32> — consecutive late payment count per member
+    LateContribThreshold,    // u32 — late payments before demotion is triggered (default: 3)
+    GracePeriodSeconds,      // u64 — seconds after deadline during which late payments are accepted
 }
 
 // ── #330: Contribution Delegation ────────────────────────────────────────────

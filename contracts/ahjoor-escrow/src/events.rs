@@ -1593,3 +1593,31 @@ pub fn emit_multi_party_approval(
     }
     .publish(e);
 }
+
+// ── #353: Time-Locked Staged Release Events ───────────────────────────────────
+
+/// Event: A scheduled release tranche was claimed by the beneficiary
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ScheduledReleaseExecuted {
+    pub escrow_id: u32,
+    pub tranche_index: u32,
+    pub amount: i128,
+    pub remaining_tranches: u32,
+}
+
+pub fn emit_scheduled_release_executed(
+    e: &Env,
+    escrow_id: u32,
+    tranche_index: u32,
+    amount: i128,
+    remaining_tranches: u32,
+) {
+    ScheduledReleaseExecuted {
+        escrow_id,
+        tranche_index,
+        amount,
+        remaining_tranches,
+    }
+    .publish(e);
+}

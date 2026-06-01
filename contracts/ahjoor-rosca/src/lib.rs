@@ -758,9 +758,22 @@ impl AhjoorContract {
                 .expect("Deadline not set")
         };
 
-        if env.ledger().timestamp() > deadline {
+        let now_ts = env.ledger().timestamp();
+
+        // #356: Allow late contributions during the grace period.
+        let grace_period_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey3::GracePeriodSeconds)
+            .unwrap_or(0);
+        let hard_deadline = deadline.saturating_add(grace_period_seconds);
+
+        if now_ts > hard_deadline {
             panic_with_error!(&env, Error::ContributionWindowClosed);
         }
+
+        // Track whether this contribution is "late" (after soft deadline, within grace period)
+        let is_late = now_ts > deadline;
 
         let exited_members: Vec<Address> = env
             .storage()
@@ -951,8 +964,37 @@ impl AhjoorContract {
 
         // Only mark as fully paid (and track participation) when target is reached
         if new_total == member_required_amount {
-            Self::apply_reputation_delta(&env, contributor.clone(), 10, "on_time_full");
-            Self::update_credit_score_internal(&env, &contributor, Symbol::new(&env, "on_time"));
+            if is_late {
+                // #356: Increment late contribution count; reset handled in finalize_round
+                let mut late_counts: Map<Address, u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey3::LateContributionCount)
+                    .unwrap_or(Map::new(&env));
+                let prev_late = late_counts.get(contributor.clone()).unwrap_or(0);
+                late_counts.set(contributor.clone(), prev_late + 1);
+                env.storage()
+                    .instance()
+                    .set(&DataKey3::LateContributionCount, &late_counts);
+                Self::apply_reputation_delta(&env, contributor.clone(), -5, "late_full");
+                Self::update_credit_score_internal(&env, &contributor, Symbol::new(&env, "late"));
+            } else {
+                // On-time: reset consecutive late count and reward reputation
+                let mut late_counts: Map<Address, u32> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey3::LateContributionCount)
+                    .unwrap_or(Map::new(&env));
+                if late_counts.get(contributor.clone()).unwrap_or(0) > 0 {
+                    late_counts.set(contributor.clone(), 0u32);
+                    env.storage()
+                        .instance()
+                        .set(&DataKey3::LateContributionCount, &late_counts);
+                    events::emit_late_count_reset(&env, contributor.clone());
+                }
+                Self::apply_reputation_delta(&env, contributor.clone(), 10, "on_time_full");
+                Self::update_credit_score_internal(&env, &contributor, Symbol::new(&env, "on_time"));
+            }
             paid_members.push_back(contributor.clone());
             env.storage()
                 .instance()
@@ -1437,6 +1479,58 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::SuspendedMembers, &suspended_members);
+
+        // ── #356: Penalty-Based Slot Demotion ─────────────────────────────────
+        // After tracking defaults, check if any late contributors have hit the threshold
+        // and demote them to the back of the unfulfilled payout queue.
+        {
+            let late_threshold: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey3::LateContribThreshold)
+                .unwrap_or(3);
+            let late_counts: Map<Address, u32> = env
+                .storage()
+                .instance()
+                .get(&DataKey3::LateContributionCount)
+                .unwrap_or(Map::new(&env));
+            let mut payout_order: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PayoutOrder)
+                .unwrap_or(Vec::new(&env));
+            let mut order_changed = false;
+
+            for member in members.iter() {
+                let late_count = late_counts.get(member.clone()).unwrap_or(0);
+                if late_count >= late_threshold {
+                    // Find and remove the member from their current position
+                    let mut new_order: Vec<Address> = Vec::new(&env);
+                    let mut found = false;
+                    for addr in payout_order.iter() {
+                        if addr == member && !found {
+                            found = true; // skip (remove from current position)
+                        } else {
+                            new_order.push_back(addr);
+                        }
+                    }
+                    if found {
+                        // Append to end (demoted to last unfulfilled slot)
+                        new_order.push_back(member.clone());
+                        let new_slot = new_order.len() - 1;
+                        payout_order = new_order;
+                        order_changed = true;
+                        events::emit_member_demoted(&env, member.clone(), new_slot, late_count);
+                    }
+                }
+            }
+
+            if order_changed {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::PayoutOrder, &payout_order);
+            }
+        }
 
         // ── #224: Cycle completion bonus ──────────────────────────────────────
         // A cycle ends when (current_round + 1) is a multiple of payout_order.len().
@@ -8518,6 +8612,68 @@ impl AhjoorContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         payout_order
+    }
+
+    // ── #356: Penalty-Based Slot Demotion ─────────────────────────────────────
+
+    /// Admin configures the late-contribution threshold and the grace period after
+    /// the round deadline during which late payments are still accepted (#356).
+    ///
+    /// - `late_threshold`: consecutive late cycles before a member is demoted (e.g. 3).
+    /// - `grace_period_seconds`: seconds after the round deadline during which late
+    ///   contributions are still accepted (0 = no grace period, no late tracking).
+    pub fn configure_late_demotion(
+        env: Env,
+        admin: Address,
+        late_threshold: u32,
+        grace_period_seconds: u64,
+    ) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+        if late_threshold == 0 {
+            panic_with_error!(&env, Error::InvalidMaxDefaults); // reuse existing validation error
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey3::LateContribThreshold, &late_threshold);
+        env.storage()
+            .instance()
+            .set(&DataKey3::GracePeriodSeconds, &grace_period_seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the configured late-contribution demotion threshold (default: 3).
+    pub fn get_late_contrib_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::LateContribThreshold)
+            .unwrap_or(3)
+    }
+
+    /// Get the configured grace period in seconds after the round deadline (default: 0).
+    pub fn get_grace_period_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::GracePeriodSeconds)
+            .unwrap_or(0)
+    }
+
+    /// Get the current late contribution counts for all members.
+    pub fn get_late_contribution_counts(env: Env) -> Map<Address, u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey3::LateContributionCount)
+            .unwrap_or(Map::new(&env))
     }
 
 }

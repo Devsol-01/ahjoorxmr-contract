@@ -1609,3 +1609,36 @@ pub fn emit_contribution_rebalanced(
     }
     .publish(e);
 }
+
+// ── #356: Penalty-Based Slot Demotion ────────────────────────────────────────
+
+/// Event: A member was demoted to the back of the payout queue after reaching
+/// the configured late-contribution threshold (#356).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MemberDemoted {
+    pub member: Address,
+    pub new_slot_index: u32,
+    pub late_count: u32,
+}
+
+pub fn emit_member_demoted(e: &Env, member: Address, new_slot_index: u32, late_count: u32) {
+    MemberDemoted {
+        member,
+        new_slot_index,
+        late_count,
+    }
+    .publish(e);
+}
+
+/// Event: A member's late-contribution count was reset due to consecutive on-time payments.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LateCountReset {
+    pub member: Address,
+}
+
+pub fn emit_late_count_reset(e: &Env, member: Address) {
+    LateCountReset { member }.publish(e);
+}
+

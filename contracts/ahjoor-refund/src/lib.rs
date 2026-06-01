@@ -306,6 +306,12 @@ pub enum DataKey {
     MerchantRefundPolicy(Address),
     /// Policy version snapshot at refund request time (#320)
     RefundPolicySnapshot(u32),
+
+    // --- Feature: Configurable Abuse Score Decay (#355) ---
+    /// Decay period in ledgers (e.g. 10_000 ≈ 14 hours at 5s/ledger). Default: 10_000.
+    AbuseScoreDecayPeriodLedgers,
+    /// Decay factor in basis points per period (e.g. 5000 = halve every period). Default: 5000.
+    AbuseScoreDecayFactorBps,
 }
 
 mod events;
@@ -4658,6 +4664,60 @@ impl AhjoorRefundContract {
         Self::load_abuse_record_with_decay(&env, &customer)
     }
 
+    // ─── #355: Configurable Abuse Score Decay ────────────────────────────────
+
+    /// Admin configures the exponential decay parameters for the abuse score system.
+    ///
+    /// - `period_ledgers`: number of ledgers between decay applications (e.g. 10_000).
+    ///   After each period the score is multiplied by `factor_bps / 10_000`.
+    /// - `factor_bps`: decay factor in basis points (e.g. 5000 = halve every period).
+    ///   Must be < 10_000 (a factor ≥ 10_000 would mean no decay or score growth).
+    ///   Use 0 to disable decay entirely.
+    ///
+    /// Updating these parameters does NOT reset existing scores; the new values are
+    /// used the next time a score is mutated or read.
+    pub fn set_abuse_score_decay_params(
+        env: Env,
+        admin: Address,
+        period_ledgers: u64,
+        factor_bps: u32,
+    ) {
+        Self::require_admin(&env, &admin);
+
+        if factor_bps > 10_000 {
+            panic!("factor_bps must be <= 10_000 (10_000 = no decay)");
+        }
+        if period_ledgers == 0 && factor_bps > 0 {
+            panic!("period_ledgers must be positive when factor_bps > 0");
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::AbuseScoreDecayPeriodLedgers, &period_ledgers);
+        env.storage()
+            .instance()
+            .set(&DataKey::AbuseScoreDecayFactorBps, &factor_bps);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Get the configured abuse score decay period in ledgers (default: 10_000).
+    pub fn get_abuse_score_decay_period_ledgers(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AbuseScoreDecayPeriodLedgers)
+            .unwrap_or(10_000u64)
+    }
+
+    /// Get the configured abuse score decay factor in basis points (default: 5_000 = halve).
+    pub fn get_abuse_score_decay_factor_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::AbuseScoreDecayFactorBps)
+            .unwrap_or(5_000u32)
+    }
+
     // --- Internal abuse-score helpers ---
 
     fn load_abuse_record_with_decay(env: &Env, customer: &Address) -> RefundAbuseRecord {
@@ -4676,19 +4736,82 @@ impl AhjoorRefundContract {
                 last_submission_ledger: 0,
             });
 
-        // Lazy decay: -1 per 10,000 ledgers since last increment
+        // #355: Configurable exponential decay.
+        // effective_score = stored_score * (factor_bps / 10_000) ^ periods_elapsed
+        // Computed on read; the decayed value is NOT written back (no storage mutation on read).
         if record.abuse_score > 0 && record.last_increment_ledger > 0 {
             let current_ledger = env.ledger().sequence() as u64;
             if current_ledger > record.last_increment_ledger {
-                let elapsed = current_ledger - record.last_increment_ledger;
-                let decay = (elapsed / 10_000) as u32;
-                if decay > 0 {
-                    record.abuse_score = record.abuse_score.saturating_sub(decay);
+                let decay_period: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::AbuseScoreDecayPeriodLedgers)
+                    .unwrap_or(10_000u64);
+                let decay_factor_bps: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::AbuseScoreDecayFactorBps)
+                    .unwrap_or(5_000u32); // default: halve every period
+
+                if decay_period > 0 {
+                    let elapsed = current_ledger - record.last_increment_ledger;
+                    let periods = (elapsed / decay_period) as u32;
+                    if periods > 0 {
+                        // Apply (factor_bps / 10_000) ^ periods multiplicatively
+                        let mut score = record.abuse_score as u128;
+                        for _ in 0..periods {
+                            score = score.saturating_mul(decay_factor_bps as u128) / 10_000;
+                            if score == 0 {
+                                break;
+                            }
+                        }
+                        record.abuse_score = score as u32;
+                    }
                 }
             }
         }
 
         record
+    }
+
+    /// Write back the decay-adjusted record and emit `AbuseScoreDecayed` when the
+    /// score was reduced by decay. This is called from mutating paths so that the
+    /// event is only emitted on state changes, not on read-only queries.
+    fn persist_abuse_record_with_decay_event(
+        env: &Env,
+        customer: &Address,
+        old_record: &RefundAbuseRecord,
+        new_record: &RefundAbuseRecord,
+    ) {
+        if old_record.abuse_score > new_record.abuse_score {
+            let decay_period: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::AbuseScoreDecayPeriodLedgers)
+                .unwrap_or(10_000u64);
+            let elapsed = if new_record.last_increment_ledger > old_record.last_increment_ledger {
+                0u64
+            } else {
+                let current = env.ledger().sequence() as u64;
+                current.saturating_sub(old_record.last_increment_ledger)
+            };
+            let periods = if decay_period > 0 { (elapsed / decay_period) as u32 } else { 0 };
+            events::emit_abuse_score_decayed(
+                env,
+                customer.clone(),
+                old_record.abuse_score,
+                new_record.abuse_score,
+                periods,
+            );
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::CustomerAbuseRecord(customer.clone()), new_record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CustomerAbuseRecord(customer.clone()),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
     }
 
     fn check_abuse_block(env: &Env, customer: &Address) {
@@ -4737,7 +4860,8 @@ impl AhjoorRefundContract {
     }
 
     fn update_abuse_on_request(env: &Env, customer: &Address, current_seq: u32, rapid_window: u32) {
-        let mut record = Self::load_abuse_record_with_decay(env, customer);
+        let old_record = Self::load_abuse_record_with_decay(env, customer);
+        let mut record = old_record.clone();
         record.total_requests += 1;
 
         // Rapid submission detection
@@ -4753,18 +4877,14 @@ impl AhjoorRefundContract {
 
         record.last_submission_ledger = current_seq;
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::CustomerAbuseRecord(customer.clone()), &record);
-        env.storage().persistent().extend_ttl(
-            &DataKey::CustomerAbuseRecord(customer.clone()),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Emit decay event if score was reduced by decay, then persist
+        Self::persist_abuse_record_with_decay_event(env, customer, &old_record, &record);
     }
 
     fn increment_abuse_score(env: &Env, customer: &Address, delta: u32, is_elevated: bool) {
-        let mut record = Self::load_abuse_record_with_decay(env, customer);
+        // Load with in-memory decay applied (does NOT write to storage)
+        let old_record = Self::load_abuse_record_with_decay(env, customer);
+        let mut record = old_record.clone();
 
         let effective_delta = if is_elevated { delta + 10 } else { delta };
         record.denied_count += 1;
@@ -4800,14 +4920,8 @@ impl AhjoorRefundContract {
             events::emit_customer_blocked_for_abuse(env, customer.clone(), blocked_until);
         }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::CustomerAbuseRecord(customer.clone()), &record);
-        env.storage().persistent().extend_ttl(
-            &DataKey::CustomerAbuseRecord(customer.clone()),
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        // Persist; decay event emitted if score dropped due to exponential decay on load
+        Self::persist_abuse_record_with_decay_event(env, customer, &old_record, &record);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

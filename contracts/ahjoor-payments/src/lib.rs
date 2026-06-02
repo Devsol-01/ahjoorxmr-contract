@@ -102,6 +102,12 @@ const IDEMPOTENCY_KEY_BUMP_AMOUNT: u32 = 17_280;
 const DEFAULT_MIN_COLLATERAL: i128 = 1_000_000; // 1 USDC (7 decimals)
 /// Default maximum tip: 3000 bps = 30% of base payment amount (#265)
 const DEFAULT_MAX_TIP_BPS: u32 = 3_000;
+/// Maximum number of beneficiaries in a tip split configuration (#370)
+const MAX_TIP_SPLIT_BENEFICIARIES: u32 = 10;
+/// Maximum number of historical notification keys to retain (#377)
+const MAX_NOTIFICATION_KEY_HISTORY: u32 = 5;
+/// Default notification key overlap window in seconds: 30 days (#377)
+const DEFAULT_KEY_OVERLAP_WINDOW_SECONDS: u64 = 30 * 24 * 3600;
 /// Default evidence submission window: 7 days in ledgers (~120,960 ledgers at 5s/ledger) (#308)
 const DEFAULT_EVIDENCE_WINDOW_LEDGERS: u32 = 120_960;
 /// Maximum evidence submissions per party (#308)
@@ -227,6 +233,23 @@ pub enum BuyerTrustTierLevel {
     Standard = 1,
     Trusted = 2,
     VIP = 3,
+}
+
+/// #370: Tip split beneficiary allocation
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TipSplitBeneficiary {
+    pub recipient: Address,
+    pub bps: u32,
+}
+
+/// #377: Notification key entry with validity window
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NotificationKeyEntry {
+    pub key: soroban_sdk::Bytes,
+    pub valid_from: u64,
+    pub valid_until: u64,
 }
 
 /// Tracks cumulative spend within the current rolling window (#235).
@@ -931,6 +954,12 @@ pub enum DataKey2 {
     BuyerTrustTier(Address, Address),
     /// #358: per-tier spending limit (merchant, tier_value as u32) → SpendLimit
     TierSpendingLimit(Address, u32),
+    /// #370: tip split configuration (merchant) → Vec<TipSplitBeneficiary>
+    TipSplitConfig(Address),
+    /// #377: notification key history (merchant) → Vec<NotificationKeyEntry>
+    NotificationKeyHistory(Address),
+    /// #377: notification key rotation config
+    NotificationKeyRotationConfig,
 }
 
 mod events;
@@ -8172,14 +8201,49 @@ impl AhjoorPaymentsContract {
             // Customer must auth the tip transfer.
             customer.require_auth();
             let token_client = token::Client::new(&env, &payment.token);
-            token_client.transfer(&customer, &payment.merchant, &tip_amount);
-            events::emit_tip_received(
-                &env,
-                payment_id,
-                payment.merchant.clone(),
-                tip_amount,
-                payment.token.clone(),
-            );
+            
+            // Check for tip split configuration (#370)
+            let split_config: Option<soroban_sdk::Vec<TipSplitBeneficiary>> = env
+                .storage()
+                .persistent()
+                .get(&DataKey2::TipSplitConfig(payment.merchant.clone()));
+            
+            match split_config {
+                Some(beneficiaries) => {
+                    // Multi-beneficiary distribution
+                    for beneficiary in beneficiaries.iter() {
+                        let allocated_amount = (tip_amount * beneficiary.bps as i128) / 10_000;
+                        
+                        // Skip zero allocations (rounding edge case)
+                        if allocated_amount > 0 {
+                            token_client.transfer(
+                                &customer,
+                                &beneficiary.recipient,
+                                &allocated_amount
+                            );
+                            
+                            events::emit_tip_split(
+                                &env,
+                                payment_id,
+                                beneficiary.recipient.clone(),
+                                allocated_amount,
+                                payment.token.clone(),
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // Fallback: single transfer to merchant (backward compatible)
+                    token_client.transfer(&customer, &payment.merchant, &tip_amount);
+                    events::emit_tip_received(
+                        &env,
+                        payment_id,
+                        payment.merchant.clone(),
+                        tip_amount,
+                        payment.token.clone(),
+                    );
+                }
+            }
         }
 
         Self::complete_payment_internal(&env, payment_id, false);

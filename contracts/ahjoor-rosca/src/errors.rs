@@ -192,4 +192,6 @@ pub enum ExtError2 {
     SlotOccupied = 111,
     /// Token mismatch between source and target groups.
     TokenMismatch = 112,
+    /// Member already has an outstanding emergency loan.
+    OutstandingLoanExists = 113,
 }

@@ -8848,7 +8848,7 @@ impl AhjoorContract {
             .get(&DataKey3::MemberOutstandingLoan(member.clone()))
             .unwrap_or(0);
         if existing_loan_id > 0 {
-            panic!("ExistingLoanOutstanding: member already has an active loan");
+            panic_with_error!(&env, ExtError2::OutstandingLoanExists);
         }
 
         // Get reserve balance

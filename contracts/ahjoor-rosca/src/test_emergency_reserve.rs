@@ -181,3 +181,51 @@ fn test_duplicate_loan_rejected() {
     }));
     assert!(result.is_err());
 }
+
+#[test]
+fn test_loan_repay_clears_outstanding_flag() {
+    let (env, client, admin, token, members, _token_client) = setup_with_members(3, 1000);
+
+    let config = crate::RoscaConfig {
+        strategy: crate::PayoutStrategy::RoundRobin,
+        custom_order: None,
+        penalty_amount: 0,
+        exit_penalty_bps: 0,
+        collective_goal: None,
+        member_goals: None,
+        fee_bps: 0,
+        fee_recipient: None,
+        max_defaults: 3,
+        grace_period_ledgers: 0,
+        use_timestamp_schedule: false,
+        round_duration_seconds: 0,
+        max_members: None,
+        skip_fee: 0,
+        max_skips_per_cycle: 0,
+        voting_mode: crate::VotingMode::Equal,
+        late_fee_bps: 0,
+        grace_period_seconds: 0,
+        auction_enabled: false,
+        auction_window_ledgers: 0,
+        randomize_payout_order: false,
+        reserve_enabled: true,
+        reserve_contribution_bps: 200,
+    };
+
+    client.init(&admin, &members, &100, &token, &3600, &config, &None);
+
+    for member in members.iter() {
+        client.contribute(&member, &100);
+    }
+
+    let borrower = members.get(0).unwrap();
+    let loan_id = client.request_emergency_loan(&borrower, &50, &500);
+
+    // Repay loan fully
+    client.repay_emergency_loan(&borrower, &loan_id, &50);
+
+    // Borrower should have no outstanding loan, so requesting again should succeed
+    let new_loan_id = client.request_emergency_loan(&borrower, &20, &500);
+    let new_loan = client.get_emergency_loan(&new_loan_id);
+    assert_eq!(new_loan.amount, 20);
+}

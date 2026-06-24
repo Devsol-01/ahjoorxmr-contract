@@ -177,6 +177,60 @@ fn test_operations_blocked_on_split_group() {
     client.propose_group_split(&admin, &0u32, &a2, &b2, &dummy_hash(&env));
 }
 
+// ── #400: complete_merge must require accepted == true ────────────────────────
+
+/// complete_merge on a proposal with accepted=false must error with MigrationNotApproved.
+#[test]
+#[should_panic]
+fn test_merge_requires_acceptance() {
+    let env = Env::default();
+    let m1 = Address::generate(&env);
+    let m2 = Address::generate(&env);
+    let (client, admin, _token) = setup_split_rosca(&env, &[m1.clone(), m2.clone()]);
+
+    // propose_merge creates proposal with accepted=false
+    let proposal_id = client.propose_merge(&admin, &99u32);
+
+    // complete_merge WITHOUT calling accept_merge first → must panic (MigrationNotApproved)
+    let new_members: Vec<Address> = Vec::new(&env);
+    client.complete_merge(&admin, &proposal_id, &new_members);
+}
+
+/// complete_merge called twice on the same accepted proposal must error on the second call.
+#[test]
+#[should_panic]
+fn test_complete_merge_double_execution_blocked() {
+    let env = Env::default();
+    let m1 = Address::generate(&env);
+    let m2 = Address::generate(&env);
+    let (client, admin, _token) = setup_split_rosca(&env, &[m1.clone(), m2.clone()]);
+
+    let proposal_id = client.propose_merge(&admin, &99u32);
+    client.accept_merge(&admin, &proposal_id);
+
+    let new_members: Vec<Address> = Vec::new(&env);
+    client.complete_merge(&admin, &proposal_id, &new_members);
+    // Second call: GroupStatus is now Merged → must panic
+    client.complete_merge(&admin, &proposal_id, &new_members);
+}
+
+/// Successful merge sets GroupStatus::Merged on the source group.
+#[test]
+fn test_complete_merge_sets_status_merged() {
+    let env = Env::default();
+    let m1 = Address::generate(&env);
+    let m2 = Address::generate(&env);
+    let (client, admin, _token) = setup_split_rosca(&env, &[m1.clone(), m2.clone()]);
+
+    let proposal_id = client.propose_merge(&admin, &99u32);
+    client.accept_merge(&admin, &proposal_id);
+
+    let new_members: Vec<Address> = Vec::new(&env);
+    client.complete_merge(&admin, &proposal_id, &new_members);
+
+    assert_eq!(client.get_group_status(), GroupStatus::Merged);
+}
+
 #[test]
 #[should_panic]
 fn test_confirmation_window_enforced() {

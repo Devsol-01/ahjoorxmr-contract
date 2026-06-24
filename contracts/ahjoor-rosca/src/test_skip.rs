@@ -58,6 +58,7 @@ fn test_skip_success_pays_fee_and_excludes_defaulter() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 0,
+            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -125,6 +126,7 @@ fn test_skip_limit_enforced() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
+            grace_period_seconds: 0,
             max_members: None,
             skip_fee: 10,
             max_skips_per_cycle: 1,
@@ -169,6 +171,7 @@ fn test_skip_deadline_enforced() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
+            grace_period_seconds: 0,
             skip_fee: 10,
             max_skips_per_cycle: 5,
             use_timestamp_schedule: false,
@@ -211,6 +214,7 @@ fn test_cannot_skip_after_contribution() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
+            grace_period_seconds: 0,
             skip_fee: 10,
             max_skips_per_cycle: 5,
             use_timestamp_schedule: false,

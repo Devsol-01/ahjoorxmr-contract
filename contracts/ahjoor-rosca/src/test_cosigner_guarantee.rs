@@ -40,6 +40,8 @@ fn setup_cosigner<'a>() -> (Env, AhjoorContractClient<'a>, Address, Address, sor
             fee_bps: 0,
             fee_recipient: None,
             max_defaults: 3,
+            grace_period_ledgers: 0,
+            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,

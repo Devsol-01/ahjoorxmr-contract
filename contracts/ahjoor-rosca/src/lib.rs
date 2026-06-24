@@ -244,6 +244,9 @@ impl AhjoorContract {
             .set(&DataKey2::GracePeriodLedgers, &config.grace_period_ledgers);
         env.storage()
             .instance()
+            .set(&DataKey3::GracePeriodSeconds, &config.grace_period_seconds);
+        env.storage()
+            .instance()
             .set(&DataKey2::PendingPenalties, &Map::<Address, u32>::new(&env));
 
         env.storage()
@@ -1545,6 +1548,29 @@ impl AhjoorContract {
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
+    /// #390: Switch between ledger-based and timestamp-based scheduling.
+    /// Forbidden once the first round has started (CurrentRound > 0) to prevent
+    /// grace-window aliasing between the two scheduling modes.
+    pub fn set_use_timestamp_schedule(env: Env, admin: Address, value: bool) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+        let current_round: u32 = env.storage().instance().get(&DataKey::CurrentRound).unwrap_or(0);
+        if current_round > 0 {
+            panic_with_error!(&env, Error::CannotChangeMidRound);
+        }
+        env.storage().instance().set(&DataKey::UseTimestampSchedule, &value);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Backward-compatible alias kept for existing test callers.
+    pub fn penalise_defaulter(env: Env, member: Address) {
+        Self::request_penalty_grace(env, member);
+    }
+
     /// Member requests a grace-period deferral of their pending penalty.
     /// Admin must approve; if within the grace window, the penalty is queued;
     /// otherwise it is applied immediately.
@@ -1587,12 +1613,7 @@ impl AhjoorContract {
             .get(&DataKey2::LastRoundDeadline)
             .or(env.storage().instance().get(&DataKey::RoundDeadline))
             .unwrap_or(0);
-        let grace_period_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey2::GracePeriodLedgers)
-            .unwrap_or(0);
-        let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
+        let grace_expires_at = internals::get_grace_deadline(&env, round_deadline);
         let current_ledger = env.ledger().timestamp();
         if current_ledger <= grace_expires_at {
             let mut pending_penalties: Map<Address, u32> = env
@@ -1649,18 +1670,13 @@ impl AhjoorContract {
             return;
         }
 
-        let grace_period_ledgers: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey2::GracePeriodLedgers)
-            .unwrap_or(0);
         let round_deadline: u64 = env
             .storage()
             .instance()
             .get(&DataKey2::LastRoundDeadline)
             .or(env.storage().instance().get(&DataKey::RoundDeadline))
             .unwrap_or(0);
-        let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
+        let grace_expires_at = internals::get_grace_deadline(env, round_deadline);
         let current_ledger = env.ledger().timestamp();
         let current_round: u32 = env
             .storage()
@@ -2371,7 +2387,7 @@ impl AhjoorContract {
             panic_with_error!(&env, Error::OnlyMembersAllowed);
         }
 
-        // Check if voter has an active delegation
+        // Check if voter has an active vote delegation
         let delegations: Map<Address, Address> = env
             .storage()
             .temporary()
@@ -2379,6 +2395,18 @@ impl AhjoorContract {
             .unwrap_or(Map::new(&env));
         if delegations.contains_key(voter.clone()) {
             panic_with_error!(&env, Error::CannotVoteWithActiveDelegation);
+        }
+
+        // #398: Also block voters who have an active contribution-weight delegation.
+        let contrib_delegations: Map<Address, ContribDelegationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ContribDelegations)
+            .unwrap_or(Map::new(&env));
+        if let Some(record) = contrib_delegations.get(voter.clone()) {
+            if record.expiry_ledger > env.ledger().sequence() as u64 {
+                panic_with_error!(&env, Error::CannotVoteWithActiveDelegation);
+            }
         }
 
         let mut proposals: Map<u32, Proposal> = env
@@ -2442,6 +2470,22 @@ impl AhjoorContract {
                         delegator_votes_against += delegator_weight;
                     }
                     // Mark delegator as voted
+                    votes.set(delegator.clone(), vote_for);
+                }
+            }
+        }
+
+        // #398: Also count votes delegated via ContribDelegations (contribution-weight path).
+        for (delegator, record) in contrib_delegations.iter() {
+            if record.delegate == voter && record.expiry_ledger > env.ledger().sequence() as u64 {
+                let delegator_voted = votes.contains_key(delegator.clone());
+                if !delegator_voted {
+                    let delegator_weight = Self::get_member_voting_weight(env.clone(), delegator.clone());
+                    if vote_for {
+                        delegator_votes_for += delegator_weight;
+                    } else {
+                        delegator_votes_against += delegator_weight;
+                    }
                     votes.set(delegator.clone(), vote_for);
                 }
             }
@@ -4389,6 +4433,69 @@ impl AhjoorContract {
         delegations.get(delegator)
     }
 
+    // --- #398: Contribution-Weight Voting Delegation ---
+
+    /// Delegate contribution-weight voting power to `delegate` until `expiry_ledger`.
+    pub fn delegate_contribution_vote(env: Env, delegator: Address, delegate: Address, expiry_ledger: u64) {
+        internals::check_not_paused(&env);
+        delegator.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&delegator) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
+        if !members.contains(&delegate) {
+            panic_with_error!(&env, Error::NotAMember);
+        }
+
+        let mut contrib_delegations: Map<Address, ContribDelegationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ContribDelegations)
+            .unwrap_or(Map::new(&env));
+
+        contrib_delegations.set(delegator.clone(), ContribDelegationRecord {
+            delegate: delegate.clone(),
+            expiry_ledger,
+        });
+        env.storage().instance().set(&DataKey3::ContribDelegations, &contrib_delegations);
+
+        events::emit_vote_delegated(&env, delegator, delegate);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Revoke an active contribution-weight voting delegation.
+    pub fn revoke_contribution_delegation(env: Env, delegator: Address) {
+        internals::check_not_paused(&env);
+        delegator.require_auth();
+
+        let mut contrib_delegations: Map<Address, ContribDelegationRecord> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::ContribDelegations)
+            .unwrap_or(Map::new(&env));
+
+        if !contrib_delegations.contains_key(delegator.clone()) {
+            panic_with_error!(&env, Error::NoDelegationFound);
+        }
+
+        contrib_delegations.remove(delegator.clone());
+        env.storage().instance().set(&DataKey3::ContribDelegations, &contrib_delegations);
+
+        events::emit_delegation_revoked(&env, delegator);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     // --- FEATURE 2: AUTO-CLOSE ROUND WHEN ALL MEMBERS HAVE CONTRIBUTED ---
 
     /// Enable or disable auto-close on full contribution
@@ -4921,6 +5028,16 @@ impl AhjoorContract {
             }
         }
 
+        // #406: Cap waitlist length to max_members to bound storage and instruction cost.
+        let max_members: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxMembers)
+            .unwrap_or(50);
+        if waitlist.len() >= max_members as u32 {
+            panic_with_error!(&env, Error::GroupFull);
+        }
+
         waitlist.push_back((caller.clone(), env.ledger().timestamp()));
         env.storage().instance().set(&DataKey2::Waitlist, &waitlist);
 
@@ -5380,6 +5497,18 @@ impl AhjoorContract {
         env.storage().instance().set(&DataKey2::CoSigners, &co_signers);
 
         events::emit_co_signer_set(&env, group_id, member, co_signer);
+        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin sets the co-signer grace-window length (in ledgers).
+    pub fn set_co_signer_window(env: Env, admin: Address, window_ledgers: u32) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+        env.storage().instance().set(&DataKey2::CoSignerWindowLedgers, &window_ledgers);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
@@ -6007,4 +6136,5 @@ mod test_waitlist;
 mod test_cosigner_guarantee;
 mod test_group_freeze;
 mod test_snapshot;
+mod test_emergency_reserve;
 pub use events::*;

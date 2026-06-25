@@ -211,16 +211,10 @@ pub enum DataKey {
     VotingDeadline,          // u64
     QuorumPercentage,        // u32 (e.g., 51 for 51%)
     MemberContributions,     // Map<Address, i128> cumulative per round
-    ProposedAdmin,           // Address — proposed new admin (pending acceptance)
-    ContractVersion,         // u32
     FeeBps,                  // u32 — protocol fee in basis points
-    FeeRecipient,            // Address — receives protocol fees
     MaxDefaults,             // u32 — suspension threshold
-    UseTimestampSchedule,    // bool
-    RoundDurationSeconds,    // u64
     RoundDeadlineTimestamp,  // u64
     MaxMembers,              // u32
-    MemberTiers,             // Map<Address, u32>
 }
 
 /// Overflow key enum — DataKey is capped at 50 variants by the soroban XDR limit.
@@ -228,6 +222,14 @@ pub enum DataKey {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey2 {
+    // Preserved discriminants for keys moved from `DataKey` to maintain storage slot identity.
+    ProposedAdmin = 40,      // Address — proposed new admin (pending acceptance)
+    ContractVersion = 41,    // u32
+    FeeRecipient = 43,       // Address — receives protocol fees
+    UseTimestampSchedule = 45,    // bool
+    RoundDurationSeconds = 46,    // u64
+    MemberTiers = 49,             // Map<Address, u32>
+
     InsurancePool,           // i128
     InsuranceContributionBps, // u32
     SkipFee,                 // i128
@@ -318,6 +320,10 @@ pub enum DataKey3 {
     // #390: Timestamp-mode grace period
     GracePeriodSeconds,      // u64 — grace window in seconds (used when UseTimestampSchedule=true)
 }
+
+const _: () = assert!(std::mem::variant_count::<DataKey>() < 50, "DataKey must remain under 50 variants");
+const _: () = assert!(std::mem::variant_count::<DataKey2>() < 50, "DataKey2 must remain under 50 variants");
+const _: () = assert!(std::mem::variant_count::<DataKey3>() < 50, "DataKey3 must remain under 50 variants");
 
 /// #398: Records an active contribution-weight voting delegation with an expiry.
 #[contracttype]

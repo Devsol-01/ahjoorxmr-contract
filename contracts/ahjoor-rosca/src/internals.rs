@@ -519,6 +519,9 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
         &DataKey::MemberContributions,
         &Map::<Address, i128>::new(env),
     );
+    env.storage()
+        .instance()
+        .set(&DataKey::Defaulters, &Vec::<Address>::new(env));
     env.storage().instance().set(
         &DataKey::RoundDeadline,
         &(env.ledger().timestamp() + duration),

@@ -5459,6 +5459,14 @@ impl AhjoorContract {
 
     /// Returns `(amount_contributed_so_far, amount_remaining)` for `member`
     /// in the current round.
+    /// Returns the full MemberContributions map for the current round.
+    pub fn get_round_contributions(env: Env) -> Map<Address, i128> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MemberContributions)
+            .unwrap_or(Map::new(&env))
+    }
+
     pub fn get_member_contribution_status(env: Env, member: Address) -> (i128, i128) {
         let target: i128 = env
             .storage()

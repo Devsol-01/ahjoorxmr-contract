@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, Env, String};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
 
 /// Event: Refund reason code recorded (#157)
 #[contractevent]
@@ -123,6 +123,16 @@ pub struct RefundCounterAccepted {
 pub struct RefundCounterRejected {
     pub refund_id: u32,
     pub customer: Address,
+}
+
+/// Event: Counter-offer expired and auto-settled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CounterOfferExpired {
+    pub refund_id: u32,
+    /// true = original refund accepted, false = rejected
+    pub resolution: bool,
+    pub original_amount: i128,
 }
 
 /// Event: Refund auto-approved after dispute window elapsed without merchant response
@@ -389,12 +399,7 @@ pub fn emit_refund_auto_rejected(e: &Env, refund_id: u32, elapsed_seconds: u64) 
     .publish(e);
 }
 
-pub fn emit_refund_tier_applied(
-    e: &Env,
-    refund_id: u32,
-    tier_bps: u32,
-    max_refundable: i128,
-) {
+pub fn emit_refund_tier_applied(e: &Env, refund_id: u32, tier_bps: u32, max_refundable: i128) {
     RefundTierApplied {
         refund_id,
         tier_bps,
@@ -430,11 +435,19 @@ pub fn emit_appeal_resolved(e: &Env, refund_id: u32, approved: bool) {
 }
 
 pub fn emit_bulk_refund_processed(e: &Env, count: u32, total_amount: i128) {
-    BulkRefundProcessed { count, total_amount }.publish(e);
+    BulkRefundProcessed {
+        count,
+        total_amount,
+    }
+    .publish(e);
 }
 
 pub fn emit_refund_appealed(e: &Env, refund_id: u32, customer: Address) {
-    RefundAppealed { refund_id, customer }.publish(e);
+    RefundAppealed {
+        refund_id,
+        customer,
+    }
+    .publish(e);
 }
 
 // --- #166 ---
@@ -454,7 +467,11 @@ pub fn emit_delegate_added(e: &Env, merchant: Address, delegate: Address) {
 }
 
 pub fn emit_refund_approved_by_delegate(e: &Env, refund_id: u32, delegate: Address) {
-    RefundApprovedByDelegate { refund_id, delegate }.publish(e);
+    RefundApprovedByDelegate {
+        refund_id,
+        delegate,
+    }
+    .publish(e);
 }
 
 // --- #168 ---
@@ -507,7 +524,7 @@ pub struct FraudScoreDecayApplied {
 /// Event: Fraud score block threshold updated
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct FraudScoreBlockThresholdUpdated {
+pub struct FraudBlockThresholdUpdated {
     pub old_threshold: u32,
     pub new_threshold: u32,
 }
@@ -515,11 +532,21 @@ pub struct FraudScoreBlockThresholdUpdated {
 // --- Helper Emission Functions ---
 
 pub fn emit_fraud_score_updated(e: &Env, buyer: Address, new_score: u32, reason: Symbol) {
-    FraudScoreUpdated { buyer, new_score, reason }.publish(e);
+    FraudScoreUpdated {
+        buyer,
+        new_score,
+        reason,
+    }
+    .publish(e);
 }
 
 pub fn emit_buyer_blocked_for_fraud(e: &Env, buyer: Address, score: u32, threshold: u32) {
-    BuyerBlockedForFraud { buyer, score, threshold }.publish(e);
+    BuyerBlockedForFraud {
+        buyer,
+        score,
+        threshold,
+    }
+    .publish(e);
 }
 
 pub fn emit_fraud_score_reset(e: &Env, buyer: Address, reset_by: Address) {
@@ -527,23 +554,62 @@ pub fn emit_fraud_score_reset(e: &Env, buyer: Address, reset_by: Address) {
 }
 
 pub fn emit_fraud_score_decay_applied(e: &Env, buyer: Address, old_score: u32, new_score: u32) {
-    FraudScoreDecayApplied { buyer, old_score, new_score }.publish(e);
+    FraudScoreDecayApplied {
+        buyer,
+        old_score,
+        new_score,
+    }
+    .publish(e);
 }
 
 pub fn emit_fraud_score_block_threshold_updated(e: &Env, old_threshold: u32, new_threshold: u32) {
-    FraudScoreBlockThresholdUpdated { old_threshold, new_threshold }.publish(e);
+    FraudBlockThresholdUpdated {
+        old_threshold,
+        new_threshold,
+    }
+    .publish(e);
 }
 
-pub fn emit_refund_counter_offered(e: &Env, refund_id: u32, merchant: Address, counter_amount: i128, expires_at: u64) {
-    RefundCounterOffered { refund_id, merchant, counter_amount, expires_at }.publish(e);
+pub fn emit_refund_counter_offered(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    counter_amount: i128,
+    expires_at: u64,
+) {
+    RefundCounterOffered {
+        refund_id,
+        merchant,
+        counter_amount,
+        expires_at,
+    }
+    .publish(e);
 }
 
 pub fn emit_refund_counter_accepted(e: &Env, refund_id: u32, customer: Address, amount: i128) {
-    RefundCounterAccepted { refund_id, customer, amount }.publish(e);
+    RefundCounterAccepted {
+        refund_id,
+        customer,
+        amount,
+    }
+    .publish(e);
 }
 
 pub fn emit_refund_counter_rejected(e: &Env, refund_id: u32, customer: Address) {
-    RefundCounterRejected { refund_id, customer }.publish(e);
+    RefundCounterRejected {
+        refund_id,
+        customer,
+    }
+    .publish(e);
+}
+
+pub fn emit_counter_offer_expired(e: &Env, refund_id: u32, resolution: bool, original_amount: i128) {
+    CounterOfferExpired {
+        refund_id,
+        resolution,
+        original_amount,
+    }
+    .publish(e);
 }
 
 // --- Issue #228: Refund Merchant Auto-Approval Threshold ---
@@ -559,7 +625,7 @@ pub struct AutoApproveThresholdSet {
 /// Event: Refund auto-approved because amount <= merchant threshold
 #[contractevent]
 #[derive(Clone, Debug)]
-pub struct RefundAutoApprovedByThreshold {
+pub struct RefundApprovedByLimit {
     pub refund_id: u32,
     pub amount: i128,
 }
@@ -569,7 +635,7 @@ pub fn emit_auto_approve_threshold_set(e: &Env, merchant: Address, amount: i128)
 }
 
 pub fn emit_refund_auto_approved_by_threshold(e: &Env, refund_id: u32, amount: i128) {
-    RefundAutoApprovedByThreshold { refund_id, amount }.publish(e);
+    RefundApprovedByLimit { refund_id, amount }.publish(e);
 }
 
 // --- Issue #245: Partial Refund Approval ---
@@ -600,6 +666,8 @@ pub fn emit_refund_partially_approved(
         remaining_unreturned,
     }
     .publish(e);
+}
+
 // --- Issue #238: Refund Priority ---
 
 /// Event: Priority set or changed on a refund request
@@ -612,5 +680,443 @@ pub struct RefundPrioritySet {
 }
 
 pub fn emit_refund_priority_set(e: &Env, refund_id: u32, new_priority: u32, set_by: Address) {
-    RefundPrioritySet { refund_id, new_priority, set_by }.publish(e);
+    RefundPrioritySet {
+        refund_id,
+        new_priority,
+        set_by,
+    }
+    .publish(e);
+}
+
+// --- Issue #274: Merchant Reserve Fund ---
+
+pub fn emit_reserve_deposited(e: &Env, merchant: Address, amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "ReserveDeposited"),),
+        (merchant, amount),
+    );
+}
+
+pub fn emit_reserve_withdrawn(e: &Env, merchant: Address, amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "ReserveWithdrawn"),),
+        (merchant, amount),
+    );
+}
+
+pub fn emit_reserve_used_for_refund(e: &Env, merchant: Address, refund_id: u32, amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "ReserveUsedForRefund"),),
+        (merchant, refund_id, amount),
+    );
+}
+
+pub fn emit_merchant_flagged_low_reserve(
+    e: &Env,
+    merchant: Address,
+    current_reserve: i128,
+    required_reserve: i128,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "MerchantFlaggedLowReserve"),),
+        (merchant, current_reserve, required_reserve),
+    );
+}
+
+// --- Issue #276: Merchant Counter-Dispute Evidence Window ---
+
+pub fn emit_merchant_evidence_submitted(
+    e: &Env,
+    refund_id: u32,
+    merchant: Address,
+    num_hashes: u32,
+    statement_hash: soroban_sdk::BytesN<32>,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "MerchantEvidenceSubmitted"),),
+        (refund_id, merchant, num_hashes, statement_hash),
+    );
+}
+
+pub fn emit_evidence_period_expired(e: &Env, refund_id: u32, merchant: Address) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "EvidencePeriodExpired"),),
+        (refund_id, merchant),
+    );
+}
+
+// --- Store-Credit Voucher Events ---
+
+/// Event: Store-credit voucher issued as alternative to token refund
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StoreCreditIssued {
+    pub refund_id: u32,
+    pub customer: Address,
+    pub merchant: Address,
+    pub credit_amount: i128,
+    pub expiry_ledger: u64,
+}
+
+/// Event: Store-credit redeemed against a payment
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct StoreCreditRedeemed {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount_used: i128,
+    pub remaining_credit: i128,
+}
+
+pub fn emit_store_credit_issued(
+    e: &Env,
+    refund_id: u32,
+    customer: Address,
+    merchant: Address,
+    credit_amount: i128,
+    expiry_ledger: u64,
+) {
+    StoreCreditIssued {
+        refund_id,
+        customer,
+        merchant,
+        credit_amount,
+        expiry_ledger,
+    }
+    .publish(e);
+}
+
+// --- New Events for #320, #334, #335 ---
+
+/// Event: Merchant published refund policy (#320)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundPolicyPublished {
+    pub merchant: Address,
+    pub eligible_window_ledgers: u32,
+    pub max_refund_bps: u32,
+}
+
+/// Event: Merchant reserve deposited (#334)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantReserveDeposited {
+    pub merchant: Address,
+    pub amount: i128,
+    pub new_balance: i128,
+}
+
+/// Event: Merchant reserve low alert (#334)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantReserveLow {
+    pub merchant: Address,
+    pub balance: i128,
+    pub required_minimum: i128,
+}
+
+/// Event: Review extension granted (#335)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReviewExtensionGranted {
+    pub refund_id: u32,
+    pub new_deadline_ledger: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveRequirementWaived {
+    pub merchant: Address,
+    pub expiry_ledger: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundPolicyUpdated {
+    pub merchant: Address,
+}
+
+pub fn emit_refund_policy_published(
+    e: &Env,
+    merchant: Address,
+    eligible_window_ledgers: u32,
+    max_refund_bps: u32,
+) {
+    RefundPolicyPublished {
+        merchant,
+        eligible_window_ledgers,
+        max_refund_bps,
+    }
+    .publish(e);
+}
+
+pub fn emit_merchant_reserve_deposited(
+    e: &Env,
+    merchant: Address,
+    amount: i128,
+    new_balance: i128,
+) {
+    MerchantReserveDeposited {
+        merchant,
+        amount,
+        new_balance,
+    }
+    .publish(e);
+}
+
+pub fn emit_merchant_reserve_low(
+    e: &Env,
+    merchant: Address,
+    balance: i128,
+    required_minimum: i128,
+) {
+    MerchantReserveLow {
+        merchant,
+        balance,
+        required_minimum,
+    }
+    .publish(e);
+}
+
+pub fn emit_review_extension_granted(e: &Env, refund_id: u32, new_deadline_ledger: u32) {
+    ReviewExtensionGranted {
+        refund_id,
+        new_deadline_ledger,
+    }
+    .publish(e);
+}
+
+pub fn emit_reserve_requirement_waived(e: &Env, merchant: Address, expiry_ledger: u32) {
+    ReserveRequirementWaived {
+        merchant,
+        expiry_ledger,
+    }
+    .publish(e);
+}
+
+pub fn emit_refund_policy_updated(e: &Env, merchant: Address) {
+    RefundPolicyUpdated { merchant }.publish(e);
+}
+
+pub fn emit_store_credit_redeemed(
+    e: &Env,
+    payment_id: u32,
+    customer: Address,
+    merchant: Address,
+    amount_used: i128,
+    remaining_credit: i128,
+) {
+    StoreCreditRedeemed {
+        payment_id,
+        customer,
+        merchant,
+        amount_used,
+        remaining_credit,
+    }
+    .publish(e);
+}
+
+// ─── Feature: Escalating Mediation Timeline ──────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundEscalated {
+    pub refund_id: u32,
+    pub escalated_by: Address,
+    pub senior_arbiter: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscalatedRefundResolved {
+    pub refund_id: u32,
+    pub senior_arbiter: Address,
+    pub approved: bool,
+    pub resolution_hash: BytesN<32>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RefundAutoApprovedSeniorMiss {
+    pub refund_id: u32,
+}
+
+pub fn emit_refund_escalated(
+    e: &Env,
+    refund_id: u32,
+    escalated_by: Address,
+    senior_arbiter: Address,
+) {
+    RefundEscalated {
+        refund_id,
+        escalated_by,
+        senior_arbiter,
+    }
+    .publish(e);
+}
+
+pub fn emit_escalated_refund_resolved(
+    e: &Env,
+    refund_id: u32,
+    senior_arbiter: Address,
+    approved: bool,
+    resolution_hash: BytesN<32>,
+) {
+    EscalatedRefundResolved {
+        refund_id,
+        senior_arbiter,
+        approved,
+        resolution_hash,
+    }
+    .publish(e);
+}
+
+pub fn emit_refund_auto_approved_senior_miss(e: &Env, refund_id: u32) {
+    RefundAutoApprovedSeniorMiss { refund_id }.publish(e);
+}
+
+// ─── Feature: Customer Abuse Score ───────────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerAbuseScoreUpdated {
+    pub customer: Address,
+    pub new_score: u32,
+    pub delta: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerBlockedForAbuse {
+    pub customer: Address,
+    pub blocked_until_ledger: u64,
+}
+
+pub fn emit_customer_abuse_score_updated(e: &Env, customer: Address, new_score: u32, delta: u32) {
+    CustomerAbuseScoreUpdated {
+        customer,
+        new_score,
+        delta,
+    }
+    .publish(e);
+}
+
+pub fn emit_customer_blocked_for_abuse(e: &Env, customer: Address, blocked_until_ledger: u64) {
+    CustomerBlockedForAbuse {
+        customer,
+        blocked_until_ledger,
+    }
+    .publish(e);
+}
+
+// ─── Issue #349: Partial Refund Processed ────────────────────────────────────
+
+/// Event: A partial refund was processed; tracks cumulative progress per payment.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialRefundProcessed {
+    pub payment_id: u32,
+    pub refund_amount: i128,
+    pub remaining_amount: i128,
+}
+
+pub fn emit_partial_refund_processed(
+    e: &Env,
+    payment_id: u32,
+    refund_amount: i128,
+    remaining_amount: i128,
+) {
+    PartialRefundProcessed {
+        payment_id,
+        refund_amount,
+        remaining_amount,
+    }
+    .publish(e);
+}
+
+// ─── Feature: Cross-Contract Refund Registration ─────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CrossContractRefundRegistered {
+    pub refund_id: u32,
+    pub origin_contract: Address,
+    pub origin_id: u32,
+    pub customer: Address,
+    pub amount: i128,
+}
+
+pub fn emit_cross_contract_refund_registered(
+    e: &Env,
+    refund_id: u32,
+    origin_contract: Address,
+    origin_id: u32,
+    customer: Address,
+    amount: i128,
+) {
+    CrossContractRefundRegistered {
+        refund_id,
+        origin_contract,
+        origin_id,
+        customer,
+        amount,
+    }
+    .publish(e);
+}
+
+// ─── Issue #355: Configurable Abuse Score Decay ───────────────────────────────
+
+/// Event: Abuse score decayed due to elapsed time without new violations
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AbuseScoreDecayed {
+    pub buyer: Address,
+    pub old_score: u32,
+    pub new_score: u32,
+    pub periods_elapsed: u32,
+}
+
+pub fn emit_abuse_score_decayed(
+    e: &Env,
+    buyer: Address,
+    old_score: u32,
+    new_score: u32,
+    periods_elapsed: u32,
+) {
+    AbuseScoreDecayed {
+        buyer,
+        old_score,
+        new_score,
+        periods_elapsed,
+    }
+    .publish(e);
+}
+
+// ─── Issue #365: Evidence Hash Anchoring ─────────────────────────────────────
+
+/// Event: Evidence content hash anchored on-chain for a refund (#365)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EvidenceAnchored {
+    pub refund_id: u32,
+    pub submitter: Address,
+    pub content_hash: BytesN<32>,
+    pub timestamp: u64,
+}
+
+pub fn emit_evidence_anchored(
+    e: &Env,
+    refund_id: u32,
+    submitter: Address,
+    content_hash: BytesN<32>,
+    timestamp: u64,
+) {
+    EvidenceAnchored {
+        refund_id,
+        submitter,
+        content_hash,
+        timestamp,
+    }
+    .publish(e);
 }

@@ -47,6 +47,25 @@ pub struct RoscaConfig {
     pub skip_fee: i128,
     pub max_skips_per_cycle: u32,
     pub voting_mode: VotingMode,
+    /// Late fee in basis points applied to contributions during the grace period.
+    /// Collected from the late contributor and distributed to on-time members.
+    /// 0 = no late fee (grace period is free). Max 1000 bps (10%).
+    pub late_fee_bps: u32,
+    /// Grace period duration in seconds (timestamp-based schedule).
+    /// Used when use_timestamp_schedule = true. 0 = no grace period.
+    pub grace_period_seconds: u64,
+    /// Enable the slot auction mechanism for this group.
+    /// When true, an auction opens at the start of each new cycle.
+    pub auction_enabled: bool,
+    /// Number of ledger timestamps (seconds) the bidding window stays open.
+    /// Ignored when auction_enabled = false.
+    pub auction_window_ledgers: u64,
+    /// Enable verifiable on-chain payout order randomization (#315)
+    pub randomize_payout_order: bool,
+    /// Enable emergency reserve for this group (#313)
+    pub reserve_enabled: bool,
+    /// Surcharge percentage (bps) on each contribution routed to emergency reserve (#313)
+    pub reserve_contribution_bps: u32,
 }
 
 #[contracttype]
@@ -278,7 +297,14 @@ pub enum DataKey2 {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey3 {
+    // #315: Payout Order Randomization
+    RandomizePayoutOrder,    // bool — enable randomization for this group
+    PayoutOrderSeed,         // BytesN<32> — seed for Fisher-Yates shuffle
+    PayoutOrderFinalized,    // bool — track if order has been finalized
+    // #352: Contribution Rebalancing
+    BasePoolTarget,          // i128 — immutable payout target per cycle (initial_members × contribution_amount)
     CoSignerWindowStart,     // Map<Address, u32> — member → ledger when window opened (#240)
+    ProxyAuthorizations,     // Map<(u32, Address), ProxyAuthorization> — (group_id, member)
     IsFrozen,                // bool — group is frozen by contract-level admin (#236)
     // #267: Tiered Contribution Levels
     GroupTiers,              // Vec<Tier> — named tier definitions
@@ -300,6 +326,84 @@ pub struct ContribDelegationRecord {
     pub delegate: Address,
     /// Ledger sequence after which this delegation is considered expired.
     pub expiry_ledger: u64,
+    // Slot Auction
+    AuctionEnabled,          // bool — auction feature flag
+    AuctionWindowLedgers,    // u64 — bidding window duration in seconds
+    AuctionOpenUntil,        // u64 — timestamp when current auction window closes (0 = no open auction)
+    AuctionBids,             // Vec<SlotBid> — bids placed in the current auction
+    AuctionRound,            // u32 — the round for which the current auction was opened
+    // Cross-Group Migration
+    MigrationRequests,       // Map<Address, MigrationRequest> — member → pending outbound migration
+    IncomingMigrations,      // Map<Address, IncomingMigration> — member → pending inbound migration
+    MigratedMembers,         // Map<Address, MigratedMemberRecord> — member → migration annotation
+    VacantSlots,             // Vec<u32> — slot indices freed by migrated-out members
+    // #313: Emergency Liquidity Reserve
+    ReserveEnabled,          // bool — emergency reserve feature flag
+    EmergencyReserveBalance, // i128 — total balance in emergency reserve
+    EmergencyLoanCounter,    // u32 — counter for loan IDs
+    EmergencyLoan(u32),      // loan_id → EmergencyLoan record
+    MemberOutstandingLoan(Address), // member → active loan_id (0 = none)
+    /// #314: Group treasury configuration
+    TreasuryConfig,          // TreasuryConfig
+    /// #314: Group treasury balance
+    TreasuryBalance,         // i128
+    /// #314: Treasury round proposals per round
+    TreasuryRoundProposal(u32), // (round_index) → TreasuryRoundProposal
+    /// #314: Treasury round votes per member
+    TreasuryRoundVotes(u32, Address), // (round_index, member) → bool
+    // #330: Contribution Delegation
+    ContribDelegations,      // Map<Address, ContribDelegationRecord> — member → delegation
+    // #331: Group Split
+    SplitProposalCounter,    // u32
+    SplitProposals,          // Map<u32, SplitProposal>
+    SplitConfirmationWindow, // u32 — ledgers members have to confirm
+    // #356: Penalty-Based Slot Demotion
+    LateContributionCount,   // Map<Address, u32> — consecutive late payment count per member
+    LateContribThreshold,    // u32 — late payments before demotion is triggered (default: 3)
+    GracePeriodSeconds,      // u64 — seconds after deadline during which late payments are accepted
+    // #359: Savings goal milestone reward pool
+    SavingsRewardPool,       // i128 — token balance held for savings goal milestone rewards
+    // #359: Per-member milestone claim bitmask (goal_id, member) → u64 bitmask
+    SavingsMilestonesClaimed(u32, Address), // (goal_id, member) → u64
+    // #375: Sealed-bid (commit-reveal) slot auction
+    SealedAuction,             // SealedAuctionState — config + current phase state
+    SlotBidCommit(u32, Address), // (round, bidder) → SealedCommit
+    SealedCommitters(u32),     // (round) → Vec<Address> — everyone who committed this round
+    SealedRevealedBids(u32),   // (round) → Vec<SlotBid> — valid revealed bids this round
+}
+
+// ── #330: Contribution Delegation ────────────────────────────────────────────
+
+/// Delegation record granting a proxy the right to act for a member.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContribDelegationRecord {
+    pub proxy: Address,
+    pub expiry_ledger: u64,
+}
+
+// ── #331: Group Split ─────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum SplitProposalStatus {
+    Pending = 0,
+    Executed = 1,
+    Expired = 2,
+}
+
+/// Proposal to divide one ROSCA group into two independent sub-groups.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SplitProposal {
+    pub id: u32,
+    pub group_a_members: Vec<Address>,
+    pub group_b_members: Vec<Address>,
+    pub split_reason_hash: BytesN<32>,
+    pub confirmations: Vec<Address>,
+    pub status: SplitProposalStatus,
+    pub created_at_ledger: u32,
+    pub expiry_ledger: u32,
 }
 
 /// Persistent storage keys — kept separate because DataKey was hitting
@@ -314,6 +418,21 @@ pub enum PersistentKey {
     LastSnapshotLedger,        // u32 — last snapshot ledger for spam guard (#243)
     MinSnapshotIntervalLedgers, // u32 — min interval between snapshots (#243)
     MemberCreditScores,        // Map<Address, MemberScore> — per-member credit score (#269)
+    /// #364: Point-in-time cycle snapshot keyed by cycle number
+    CycleSnapshot(u32),        // cycle_number → CycleSnapshotData
+}
+
+/// #364: Immutable point-in-time snapshot of group state at cycle end.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CycleSnapshotData {
+    pub cycle_number: u32,
+    pub members: Vec<Address>,
+    pub contribution_amounts: Map<Address, i128>,
+    pub payout_queue: Vec<Address>,
+    pub pool_balance: i128,
+    pub timestamp: u64,
+    pub snapshot_hash: BytesN<32>,
 }
 
 /// Record of a single freeze/unfreeze cycle for a group.
@@ -355,6 +474,14 @@ pub enum CoSignerStatus {
 pub struct CoSignerRecord {
     pub co_signer: Address,
     pub status: CoSignerStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyAuthorization {
+    pub proxy: Address,
+    pub max_rounds: u32,
+    pub used_rounds: u32,
 }
 
 // ── Audit Trail ────────────────────────────────────────────────────────────────
@@ -406,6 +533,20 @@ pub struct EmergencyPayoutConfig {
     pub max_emergency_per_cycle: u32,   // max emergency payouts per cycle
 }
 
+// --- Emergency Liquidity Reserve Types (#313) ---
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyLoan {
+    pub loan_id: u32,
+    pub borrower: Address,
+    pub amount: i128,
+    pub created_at_ledger: u32,
+    pub repayment_deadline_ledger: u32,
+    pub repaid_amount: i128,
+    pub defaulted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[contracttype]
 pub enum GroupStatus {
@@ -413,6 +554,8 @@ pub enum GroupStatus {
     Dissolved = 1,
     /// Group was merged into another group; all further interactions are rejected.
     Merged = 2,
+    /// Group was split into two sub-groups; no further operations permitted.
+    Split = 3,
 }
 
 #[contracttype]
@@ -513,4 +656,142 @@ pub struct ScoreWeights {
     pub completion_weight: i128,
 }
 
+// ── Slot Auction (#slot-auction) ──────────────────────────────────────────────
 
+/// A single bid placed during a slot auction.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlotBid {
+    /// The member who placed this bid.
+    pub bidder: Address,
+    /// The payout-order slot index the bidder wants to move into.
+    pub desired_slot: u32,
+    /// Amount of base token deposited as the bid.
+    pub amount: i128,
+    /// Ledger timestamp at which the bid was placed (used for tie-breaking).
+    pub placed_at: u64,
+}
+
+// ── #375: Sealed-Bid (Commit-Reveal) Slot Auction ─────────────────────────────
+
+/// #375: Configuration and live phase state for a commit-reveal sealed-bid
+/// slot auction. A single struct keeps the auction's tunables and the current
+/// phase deadlines together under one storage key.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedAuctionState {
+    /// Whether sealed-bid auctions are enabled for this group.
+    pub enabled: bool,
+    /// Duration (seconds) of the commit phase once an auction is opened.
+    pub commit_duration: u64,
+    /// Duration (seconds) of the reveal phase that follows the commit phase.
+    pub reveal_duration: u64,
+    /// Minimum reserve price; the winning bid must strictly exceed this.
+    pub min_reserve: i128,
+    /// Round this auction targets (meaningful only while `open`).
+    pub round: u32,
+    /// Timestamp at which the commit phase closes.
+    pub commit_until: u64,
+    /// Timestamp at which the reveal phase closes.
+    pub reveal_until: u64,
+    /// Whether an auction is currently open (awaiting settlement).
+    pub open: bool,
+}
+
+/// #375: A stored commitment for a single sealed bid.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedCommit {
+    /// sha256(bid_amount.to_be_bytes() || salt) committed during the commit phase.
+    pub commit_hash: BytesN<32>,
+    /// Collateral deposited at commit time; also the upper bound on the bid the
+    /// bidder may later reveal.
+    pub deposit: i128,
+    /// Whether this commitment has already been revealed.
+    pub revealed: bool,
+}
+
+// ── Cross-Group Member Migration ───────────────────────────────────────────────
+
+/// Approval state for a pending cross-group migration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum MigrationApprovalState {
+    /// Neither admin has approved yet.
+    Pending = 0,
+    /// Source admin approved; waiting for destination admin.
+    SourceApproved = 1,
+    /// Destination admin approved; waiting for source admin.
+    DestApproved = 2,
+    /// Both admins approved — ready to execute.
+    BothApproved = 3,
+    /// Migration has been executed.
+    Executed = 4,
+}
+
+/// A pending cross-group migration request stored on the **source** contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigrationRequest {
+    /// The member who wants to migrate.
+    pub member: Address,
+    /// Address of the destination group contract.
+    pub to_group: Address,
+    /// Slot index in the destination group's payout order.
+    pub target_slot: u32,
+    /// Approval state.
+    pub state: MigrationApprovalState,
+    /// Timestamp when the request was created.
+    pub created_at: u64,
+}
+
+/// Contribution history summary carried from the source group to the destination.
+/// Stored on the **destination** contract as a `MigratedMember` annotation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MigratedMemberRecord {
+    /// Address of the source group contract.
+    pub from_group: Address,
+    /// Number of rounds the member fully completed in the source group.
+    pub rounds_completed: u32,
+    /// Number of on-time (full, non-late) contributions in the source group.
+    pub on_time_count: u32,
+    /// Slot index assigned in this (destination) group.
+    pub slot_index: u32,
+    /// Timestamp when the migration was executed.
+    pub migrated_at: u64,
+}
+
+/// Incoming migration approval stored on the **destination** contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncomingMigration {
+    /// The member being migrated in.
+    pub member: Address,
+    /// Address of the source group contract.
+    pub from_group: Address,
+    /// Slot index to insert the member at.
+    pub target_slot: u32,
+    /// Whether the destination admin has approved.
+    pub dest_approved: bool,
+}
+
+/// Group treasury configuration (#314)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryConfig {
+    pub treasury_admin: Address,
+    pub enabled: bool,
+}
+
+/// Treasury round proposal (#314)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryRoundProposal {
+    pub round_index: u32,
+    pub purpose_hash: BytesN<32>,
+    pub proposed_at: u64,
+    pub votes_for: i128,
+    pub votes_against: i128,
+    pub confirmed: bool,
+}

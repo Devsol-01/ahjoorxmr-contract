@@ -1,21 +1,77 @@
-use soroban_sdk::{contractclient, Address, Env};
+use soroban_sdk::{contractclient, Address, BytesN, Env};
 
-/// Client interface for the token whitelist contract
-/// This allows other contracts to call the whitelist contract
+use crate::Error;
+use crate::TokenQuota;
+
 #[contractclient(name = "TokenWhitelistClient")]
 pub trait TokenWhitelistInterface {
-    /// Check if a token is allowed
     fn is_token_allowed(env: Env, token: Address) -> bool;
-    
-    /// Add a token to the whitelist (admin only)
+
+    fn is_whitelisted(env: Env, token: Address) -> bool;
+
+    fn is_token_allowed_for_contract(env: Env, contract_id: Address, token: Address) -> bool;
+
+    fn set_contract_token(
+        env: Env,
+        admin: Address,
+        contract_id: Address,
+        token: Address,
+        expiry_ledger: Option<u32>,
+    );
+
+    fn remove_contract_token(env: Env, admin: Address, contract_id: Address, token: Address);
+
+    fn get_contract_token_entry(
+        env: Env,
+        contract_id: Address,
+        token: Address,
+    ) -> Option<Option<u32>>;
+
     fn add_token(env: Env, admin: Address, token: Address);
-    
-    /// Remove a token from the whitelist (admin only)
+
     fn remove_token(env: Env, admin: Address, token: Address);
-    
-    /// Get all whitelisted tokens
+
     fn get_whitelisted_tokens(env: Env) -> soroban_sdk::Vec<Address>;
-    
-    /// Get the current admin
+
     fn get_admin(env: Env) -> Address;
+
+    fn set_token_quota(
+        env: Env,
+        admin: Address,
+        token: Address,
+        max_volume_per_period: i128,
+        period_ledgers: u32,
+    );
+
+    fn update_token_quota(
+        env: Env,
+        admin: Address,
+        token: Address,
+        max_volume_per_period: i128,
+        period_ledgers: u32,
+    );
+
+    fn remove_token_quota(env: Env, admin: Address, token: Address);
+
+    fn get_token_quota(env: Env, token: Address) -> Option<TokenQuota>;
+
+    fn record_token_volume(env: Env, token: Address, amount: i128) -> Result<(), Error>;
+
+    fn get_token_volume(env: Env, token: Address, from_ledger: u32, to_ledger: u32) -> i128;
+
+    fn suspend_token_timed(
+        env: Env,
+        admin: Address,
+        token: Address,
+        suspend_duration_ledgers: u32,
+        reason_hash: BytesN<32>,
+    );
+
+    fn lift_token_suspension(env: Env, admin: Address, token: Address);
+
+    fn extend_token_suspension(env: Env, admin: Address, token: Address, additional_ledgers: u32);
+
+    fn get_token_suspension(env: Env, token: Address) -> Option<crate::SuspensionRecord>;
+
+    fn get_suspension_history(env: Env, token: Address) -> soroban_sdk::Vec<crate::SuspensionHistoryEntry>;
 }

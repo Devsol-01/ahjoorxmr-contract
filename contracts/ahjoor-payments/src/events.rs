@@ -1,6 +1,35 @@
 use crate::{PaymentStatus, SplitTransfer};
 use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
 
+/// Event: Consent record created for zero-amount agreement signing (#307)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ConsentRecordCreated {
+    pub consent_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+    pub terms_hash: BytesN<32>,
+    pub terms_version: String,
+}
+
+/// Event: Consent record signed by customer (#307)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ConsentSigned {
+    pub consent_id: u32,
+    pub customer: Address,
+    pub signed_at: u64,
+}
+
+/// Event: Consent record revoked (#307)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ConsentRevoked {
+    pub consent_id: u32,
+    pub revoked_by: Address,
+    pub revoked_at: u64,
+}
+
 /// Event: Payment receipt issued on completion (#65)
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -122,7 +151,10 @@ pub struct PaymentExpired {
 #[derive(Clone, Debug)]
 pub struct PaymentAuthorized {
     pub payment_id: u32,
-    pub capture_deadline: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub amount: i128,
+    pub capture_deadline_ledger: u64,
 }
 
 /// Event: Payment created with a merchant-defined expiry override (#130)
@@ -138,6 +170,43 @@ pub struct PaymentExpiryOverride {
 #[derive(Clone, Debug)]
 pub struct PaymentCaptured {
     pub payment_id: u32,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerBlocked {
+    pub merchant: Address,
+    pub customer: Address,
+    pub reason_code: Symbol,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct UnblockRequested {
+    pub request_id: u32,
+    pub merchant: Address,
+    pub customer: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CustomerUnblocked {
+    pub merchant: Address,
+    pub customer: Address,
+    pub unblocked_by: Address,
+}
+
+pub fn emit_customer_blocked(e: &Env, merchant: Address, customer: Address, reason: Symbol) {
+    CustomerBlocked { merchant, customer, reason_code: reason }.publish(e);
+}
+
+pub fn emit_unblock_requested(e: &Env, request_id: u32, merchant: Address, customer: Address) {
+    UnblockRequested { request_id, merchant, customer }.publish(e);
+}
+
+pub fn emit_customer_unblocked(e: &Env, merchant: Address, customer: Address, by: Address) {
+    CustomerUnblocked { merchant, customer, unblocked_by: by }.publish(e);
 }
 
 /// Event: Partial refund issued on a pending/disputed payment
@@ -192,6 +261,23 @@ pub struct BatchSettlementProcessed {
     pub total_amount: i128,
     pub fee_collected: i128,
     pub payment_count: u32,
+}
+
+/// Event: Merchant KYB verification hash set (#310)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantKYBSet {
+    pub merchant: Address,
+    pub kyb_hash: BytesN<32>,
+    pub expiry_ledger: u64,
+    pub jurisdiction: String,
+}
+
+/// Event: Merchant KYB verification revoked (#310)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantKYBRevoked {
+    pub merchant: Address,
 }
 
 /// Event: Payment disputed by customer
@@ -286,6 +372,49 @@ pub struct WithdrawalProcessed {
 pub struct InvoiceAttached {
     pub payment_id: u32,
     pub invoice_hash: BytesN<32>,
+}
+
+/// Event: Payment expiry extended by merchant
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentExpiryExtended {
+    pub payment_id: u32,
+    pub new_expires_at: u64,
+    pub extension_count: u32,
+}
+
+/// Event: Installment plan created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanCreated {
+    pub plan_id: u32,
+    pub customer: Address,
+    pub merchant: Address,
+    pub total_amount: i128,
+    pub num_installments: u32,
+}
+
+/// Event: Installment settled.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentSettled {
+    pub plan_id: u32,
+    pub installment_index: u32,
+    pub amount_debited: i128,
+}
+
+/// Event: Installment plan completed.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanCompleted {
+    pub plan_id: u32,
+}
+
+/// Event: Installment plan expired.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InstallmentPlanExpired {
+    pub plan_id: u32,
 }
 
 // --- Helper Emission Functions ---
@@ -399,10 +528,20 @@ pub fn emit_payment_expired(
     .publish(e);
 }
 
-pub fn emit_payment_authorized(e: &Env, payment_id: u32, capture_deadline: u64) {
+pub fn emit_payment_authorized(
+    e: &Env,
+    payment_id: u32,
+    customer: Address,
+    merchant: Address,
+    amount: i128,
+    capture_deadline_ledger: u64,
+) {
     PaymentAuthorized {
         payment_id,
-        capture_deadline,
+        customer,
+        merchant,
+        amount,
+        capture_deadline_ledger,
     }
     .publish(e);
 }
@@ -415,8 +554,8 @@ pub fn emit_payment_expiry_override(e: &Env, payment_id: u32, expiry_seconds: u6
     .publish(e);
 }
 
-pub fn emit_payment_captured(e: &Env, payment_id: u32) {
-    PaymentCaptured { payment_id }.publish(e);
+pub fn emit_payment_captured(e: &Env, payment_id: u32, amount: i128) {
+    PaymentCaptured { payment_id, amount }.publish(e);
 }
 
 pub fn emit_payment_partial_refund(
@@ -758,6 +897,20 @@ pub fn emit_invoice_attached(e: &Env, payment_id: u32, invoice_hash: BytesN<32>)
     .publish(e);
 }
 
+pub fn emit_payment_expiry_extended(
+    e: &Env,
+    payment_id: u32,
+    new_expires_at: u64,
+    extension_count: u32,
+) {
+    PaymentExpiryExtended {
+        payment_id,
+        new_expires_at,
+        extension_count,
+    }
+    .publish(e);
+}
+
 // --- Collateral Events (#129) ---
 
 /// Event: Merchant deposited collateral
@@ -875,12 +1028,38 @@ pub struct NotificationKeyRemoved {
     pub merchant: Address,
 }
 
+/// Event: Notification key rotated (#377)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct NotificationKeyRotated {
+    pub merchant: Address,
+    pub old_key_hash: BytesN<32>,
+    pub new_key_hash: BytesN<32>,
+    pub overlap_until: u64,
+}
+
 pub fn emit_notification_key_registered(e: &Env, merchant: Address, key: soroban_sdk::Bytes) {
     NotificationKeyRegistered { merchant, key }.publish(e);
 }
 
 pub fn emit_notification_key_removed(e: &Env, merchant: Address) {
     NotificationKeyRemoved { merchant }.publish(e);
+}
+
+pub fn emit_notification_key_rotated(
+    e: &Env,
+    merchant: Address,
+    old_key_hash: BytesN<32>,
+    new_key_hash: BytesN<32>,
+    overlap_until: u64,
+) {
+    NotificationKeyRotated {
+        merchant,
+        old_key_hash,
+        new_key_hash,
+        overlap_until,
+    }
+    .publish(e);
 }
 
 // --- Token Swap Events ---
@@ -1001,11 +1180,12 @@ pub struct AppealSubmitted {
     pub evidence_hash: BytesN<32>,
 }
 
-/// Event: Admin approved a merchant appeal
+/// Event: Admin approved a merchant appeal — cooling-off period begins
 #[contractevent]
 #[derive(Clone, Debug)]
 pub struct AppealApproved {
     pub merchant: Address,
+    pub cooling_off_until: u64,
 }
 
 /// Event: Admin rejected a merchant appeal
@@ -1015,20 +1195,40 @@ pub struct AppealRejected {
     pub merchant: Address,
 }
 
+/// Event: Merchant fully reinstated after cooling-off period
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MerchantReinstated {
+    pub merchant: Address,
+    pub reinstated_at: u64,
+}
+
 pub fn emit_merchant_suspended(e: &Env, merchant: Address, reason_hash: BytesN<32>, suspension_expires_at: u64) {
     MerchantSuspended { merchant, reason_hash, suspension_expires_at }.publish(e);
 }
 
 pub fn emit_merchant_banned(e: &Env, merchant: Address, reason_hash: BytesN<32>) {
-    MerchantBanned { merchant, reason_hash }.publish(e);
+    MerchantBanned {
+        merchant,
+        reason_hash,
+    }
+    .publish(e);
 }
 
 pub fn emit_appeal_submitted(e: &Env, merchant: Address, evidence_hash: BytesN<32>) {
-    AppealSubmitted { merchant, evidence_hash }.publish(e);
+    AppealSubmitted {
+        merchant,
+        evidence_hash,
+    }
+    .publish(e);
 }
 
-pub fn emit_appeal_approved(e: &Env, merchant: Address) {
-    AppealApproved { merchant }.publish(e);
+pub fn emit_appeal_approved(e: &Env, merchant: Address, cooling_off_until: u64) {
+    AppealApproved { merchant, cooling_off_until }.publish(e);
+}
+
+pub fn emit_merchant_reinstated(e: &Env, merchant: Address, reinstated_at: u64) {
+    MerchantReinstated { merchant, reinstated_at }.publish(e);
 }
 
 pub fn emit_appeal_rejected(e: &Env, merchant: Address) {
@@ -1071,16 +1271,37 @@ pub struct RecurringInvoiceCompleted {
     pub invoice_id: u32,
 }
 
-pub fn emit_recurring_invoice_created(e: &Env, invoice_id: u32, merchant: Address, customer: Address, amount: i128) {
-    RecurringInvoiceCreated { invoice_id, merchant, customer, amount }.publish(e);
+pub fn emit_recurring_invoice_created(
+    e: &Env,
+    invoice_id: u32,
+    merchant: Address,
+    customer: Address,
+    amount: i128,
+) {
+    RecurringInvoiceCreated {
+        invoice_id,
+        merchant,
+        customer,
+        amount,
+    }
+    .publish(e);
 }
 
 pub fn emit_invoice_cycle_triggered(e: &Env, invoice_id: u32, payment_id: u32, cycle_number: u32) {
-    InvoiceCycleTriggered { invoice_id, payment_id, cycle_number }.publish(e);
+    InvoiceCycleTriggered {
+        invoice_id,
+        payment_id,
+        cycle_number,
+    }
+    .publish(e);
 }
 
 pub fn emit_recurring_invoice_cancelled(e: &Env, invoice_id: u32, cancelled_by: Address) {
-    RecurringInvoiceCancelled { invoice_id, cancelled_by }.publish(e);
+    RecurringInvoiceCancelled {
+        invoice_id,
+        cancelled_by,
+    }
+    .publish(e);
 }
 
 pub fn emit_recurring_invoice_completed(e: &Env, invoice_id: u32) {
@@ -1089,10 +1310,16 @@ pub fn emit_recurring_invoice_completed(e: &Env, invoice_id: u32) {
 
 // #231: Withdrawal Rate Limiting Events
 pub fn emit_withdrawal_rate_limit_set(e: &Env, merchant: Address, window_seconds: u64, cap: i128) {
-    e.events().publish((soroban_sdk::Symbol::new(e, "WdrlLimitSet"),), (merchant, window_seconds, cap));
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "WdrlLimitSet"),),
+        (merchant, window_seconds, cap),
+    );
 }
 pub fn emit_withdrawal_rate_limit_exceeded(e: &Env, merchant: Address, attempted: i128, cap: i128) {
-    e.events().publish((soroban_sdk::Symbol::new(e, "WdrlLimitExceeded"),), (merchant, attempted, cap));
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "WdrlLimitExceeded"),),
+        (merchant, attempted, cap),
+    );
 }
 
 // #239: Loyalty Points Events
@@ -1125,16 +1352,44 @@ pub struct PointsExpired {
     pub points_expired: i128,
 }
 
-pub fn emit_points_accrued(e: &Env, customer: Address, payment_id: u32, points_earned: i128, balance: i128) {
-    PointsAccrued { customer, payment_id, points_earned, balance }.publish(e);
+pub fn emit_points_accrued(
+    e: &Env,
+    customer: Address,
+    payment_id: u32,
+    points_earned: i128,
+    balance: i128,
+) {
+    PointsAccrued {
+        customer,
+        payment_id,
+        points_earned,
+        balance,
+    }
+    .publish(e);
 }
 
-pub fn emit_points_redeemed(e: &Env, customer: Address, payment_id: u32, points_used: i128, discount_applied: i128) {
-    PointsRedeemed { customer, payment_id, points_used, discount_applied }.publish(e);
+pub fn emit_points_redeemed(
+    e: &Env,
+    customer: Address,
+    payment_id: u32,
+    points_used: i128,
+    discount_applied: i128,
+) {
+    PointsRedeemed {
+        customer,
+        payment_id,
+        points_used,
+        discount_applied,
+    }
+    .publish(e);
 }
 
 pub fn emit_points_expired(e: &Env, customer: Address, points_expired: i128) {
-    PointsExpired { customer, points_expired }.publish(e);
+    PointsExpired {
+        customer,
+        points_expired,
+    }
+    .publish(e);
 }
 
 // #242: Merchant Referral Commission Events
@@ -1165,11 +1420,27 @@ pub struct CommissionClaimed {
 }
 
 pub fn emit_referral_registered(e: &Env, referrer: Address, referred_merchant: Address) {
-    ReferralRegistered { referrer, referred_merchant }.publish(e);
+    ReferralRegistered {
+        referrer,
+        referred_merchant,
+    }
+    .publish(e);
 }
 
-pub fn emit_commission_accrued(e: &Env, referrer: Address, referred_merchant: Address, payment_id: u32, amount: i128) {
-    CommissionAccrued { referrer, referred_merchant, payment_id, amount }.publish(e);
+pub fn emit_commission_accrued(
+    e: &Env,
+    referrer: Address,
+    referred_merchant: Address,
+    payment_id: u32,
+    amount: i128,
+) {
+    CommissionAccrued {
+        referrer,
+        referred_merchant,
+        payment_id,
+        amount,
+    }
+    .publish(e);
 }
 
 pub fn emit_commission_claimed(e: &Env, referrer: Address, amount: i128) {
@@ -1197,12 +1468,36 @@ pub struct DynamicPaymentSettled {
     pub rate_used: i128,
 }
 
-pub fn emit_dynamic_payment_created(e: &Env, payment_id: u32, fiat_amount: i128, fiat_currency: soroban_sdk::Symbol, oracle_address: Address) {
-    DynamicPaymentCreated { payment_id, fiat_amount, fiat_currency, oracle_address }.publish(e);
+pub fn emit_dynamic_payment_created(
+    e: &Env,
+    payment_id: u32,
+    fiat_amount: i128,
+    fiat_currency: soroban_sdk::Symbol,
+    oracle_address: Address,
+) {
+    DynamicPaymentCreated {
+        payment_id,
+        fiat_amount,
+        fiat_currency,
+        oracle_address,
+    }
+    .publish(e);
 }
 
-pub fn emit_dynamic_payment_settled(e: &Env, payment_id: u32, fiat_amount: i128, token_amount: i128, rate_used: i128) {
-    DynamicPaymentSettled { payment_id, fiat_amount, token_amount, rate_used }.publish(e);
+pub fn emit_dynamic_payment_settled(
+    e: &Env,
+    payment_id: u32,
+    fiat_amount: i128,
+    token_amount: i128,
+    rate_used: i128,
+) {
+    DynamicPaymentSettled {
+        payment_id,
+        fiat_amount,
+        token_amount,
+        rate_used,
+    }
+    .publish(e);
 }
 
 // #235: Customer Spend Limit Events
@@ -1243,20 +1538,49 @@ pub struct DefaultSpendLimitSet {
     pub window_seconds: u64,
 }
 
-pub fn emit_customer_spend_limit_set(e: &Env, merchant: Address, customer: Address, amount: i128, window_seconds: u64) {
-    CustomerSpendLimitSet { merchant, customer, amount, window_seconds }.publish(e);
+pub fn emit_customer_spend_limit_set(
+    e: &Env,
+    merchant: Address,
+    customer: Address,
+    amount: i128,
+    window_seconds: u64,
+) {
+    CustomerSpendLimitSet {
+        merchant,
+        customer,
+        amount,
+        window_seconds,
+    }
+    .publish(e);
 }
 
 pub fn emit_customer_spend_limit_removed(e: &Env, merchant: Address, customer: Address) {
     CustomerSpendLimitRemoved { merchant, customer }.publish(e);
 }
 
-pub fn emit_customer_spend_limit_exceeded(e: &Env, merchant: Address, customer: Address, attempted: i128, cap: i128) {
-    CustomerSpendLimitExceeded { merchant, customer, attempted, cap }.publish(e);
+pub fn emit_customer_spend_limit_exceeded(
+    e: &Env,
+    merchant: Address,
+    customer: Address,
+    attempted: i128,
+    cap: i128,
+) {
+    CustomerSpendLimitExceeded {
+        merchant,
+        customer,
+        attempted,
+        cap,
+    }
+    .publish(e);
 }
 
 pub fn emit_default_spend_limit_set(e: &Env, merchant: Address, amount: i128, window_seconds: u64) {
-    DefaultSpendLimitSet { merchant, amount, window_seconds }.publish(e);
+    DefaultSpendLimitSet {
+        merchant,
+        amount,
+        window_seconds,
+    }
+    .publish(e);
 }
 
 // #265: Tip / Gratuity Events
@@ -1271,8 +1595,46 @@ pub struct TipReceived {
     pub token: Address,
 }
 
-pub fn emit_tip_received(e: &Env, payment_id: u32, merchant: Address, tip_amount: i128, token: Address) {
-    TipReceived { payment_id, merchant, tip_amount, token }.publish(e);
+/// Event: Tip split to beneficiary (#370)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TipSplit {
+    pub payment_id: u32,
+    pub beneficiary: Address,
+    pub amount: i128,
+    pub token: Address,
+}
+
+pub fn emit_tip_received(
+    e: &Env,
+    payment_id: u32,
+    merchant: Address,
+    tip_amount: i128,
+    token: Address,
+) {
+    TipReceived {
+        payment_id,
+        merchant,
+        tip_amount,
+        token,
+    }
+    .publish(e);
+}
+
+pub fn emit_tip_split(
+    e: &Env,
+    payment_id: u32,
+    beneficiary: Address,
+    amount: i128,
+    token: Address,
+) {
+    TipSplit {
+        payment_id,
+        beneficiary,
+        amount,
+        token,
+    }
+    .publish(e);
 }
 
 // Multi-sig approval events
@@ -1334,9 +1696,276 @@ pub fn emit_voucher_exhausted(e: &Env, merchant: Address, code_hash: soroban_sdk
 }
 
 // External ID indexing event
-pub fn emit_payment_indexed_by_external_id(e: &Env, payment_id: u32, ext_id: soroban_sdk::BytesN<32>) {
+pub fn emit_payment_indexed_by_external_id(
+    e: &Env,
+    payment_id: u32,
+    ext_id: soroban_sdk::BytesN<32>,
+) {
     e.events().publish(
         (soroban_sdk::Symbol::new(e, "PmtIndexedExtId"),),
         (payment_id, ext_id),
     );
+}
+
+// Consent record events (#307)
+pub fn emit_consent_record_created(
+    e: &Env,
+    consent_id: u32,
+    merchant: Address,
+    customer: Address,
+    terms_hash: BytesN<32>,
+    terms_version: String,
+) {
+    ConsentRecordCreated {
+        consent_id,
+        merchant,
+        customer,
+        terms_hash,
+        terms_version,
+    }
+    .publish(e);
+}
+
+pub fn emit_consent_signed(e: &Env, consent_id: u32, customer: Address, signed_at: u64) {
+    ConsentSigned {
+        consent_id,
+        customer,
+        signed_at,
+    }
+    .publish(e);
+}
+
+pub fn emit_consent_revoked(e: &Env, consent_id: u32, revoked_by: Address, revoked_at: u64) {
+    ConsentRevoked {
+        consent_id,
+        revoked_by,
+        revoked_at,
+    }
+    .publish(e);
+}
+// --- Dispute Evidence Events (#308) ---
+
+/// Event: Evidence submitted for a dispute
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DisputeEvidenceSubmitted {
+    pub payment_id: u32,
+    pub submitter: Address,
+    pub evidence_hash: BytesN<32>,
+    pub evidence_type: Symbol,
+}
+
+/// Event: Evidence submission window closed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EvidenceWindowClosed {
+    pub payment_id: u32,
+}
+
+pub fn emit_dispute_evidence_submitted(
+    e: &Env,
+    payment_id: u32,
+    submitter: Address,
+    evidence_hash: BytesN<32>,
+    evidence_type: Symbol,
+) {
+    DisputeEvidenceSubmitted {
+        payment_id,
+        submitter,
+        evidence_hash,
+        evidence_type,
+    }
+    .publish(e);
+}
+
+pub fn emit_evidence_window_closed(e: &Env, payment_id: u32) {
+    EvidenceWindowClosed { payment_id }.publish(e);
+}
+
+// --- Cooling-Off Events (#309) ---
+
+/// Event: Payment entered cooling-off period
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PaymentInCoolingOff {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub expiry_ledger: u32,
+}
+
+/// Event: Payment cancelled during cooling-off period
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct CoolingOffCancellation {
+    pub payment_id: u32,
+    pub customer: Address,
+    pub refund_amount: i128,
+}
+
+pub fn emit_payment_in_cooling_off(
+    e: &Env,
+    payment_id: u32,
+    customer: Address,
+    expiry_ledger: u32,
+) {
+    PaymentInCoolingOff {
+        payment_id,
+        customer,
+        expiry_ledger,
+    }
+    .publish(e);
+}
+
+pub fn emit_cooling_off_cancellation(
+    e: &Env,
+    payment_id: u32,
+    customer: Address,
+    refund_amount: i128,
+) {
+    CoolingOffCancellation {
+        payment_id,
+        customer,
+        refund_amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_merchant_kyb_set(
+    env: &Env,
+    merchant: Address,
+    kyb_hash: BytesN<32>,
+    expiry_ledger: u64,
+    jurisdiction: String,
+) {
+    MerchantKYBSet {
+        merchant,
+        kyb_hash,
+        expiry_ledger,
+        jurisdiction,
+    }
+    .publish(env);
+}
+
+pub fn emit_merchant_kyb_revoked(env: &Env, merchant: Address) {
+    MerchantKYBRevoked { merchant }.publish(env);
+}
+// ── #329: Failed Auto-Debit Retry Queue Events ────────────────────────────────
+
+pub fn emit_debit_failed(
+    e: &Env,
+    record_id: u32,
+    plan_id: u32,
+    attempt_number: u32,
+    next_retry_ledger: u64,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "DebitFailed"),),
+        (record_id, plan_id, attempt_number, next_retry_ledger),
+    );
+}
+
+pub fn emit_debit_retry_succeeded(e: &Env, record_id: u32, plan_id: u32, amount: i128) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "DebitRetrySucceeded"),),
+        (record_id, plan_id, amount),
+    );
+}
+
+pub fn emit_debit_abandoned(e: &Env, record_id: u32, plan_id: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "DebitAbandoned"),),
+        (record_id, plan_id),
+    );
+}
+
+// --- #327: Subscription Pause/Resume with Prorated Billing ---
+
+pub fn emit_subscription_paused_v2(
+    e: &Env,
+    sub_id: u32,
+    paused_by: Address,
+    paused_at_ledger: u32,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SubscriptionPausedV2"),),
+        (sub_id, paused_by, paused_at_ledger),
+    );
+}
+
+pub fn emit_subscription_resumed_v2(
+    e: &Env,
+    sub_id: u32,
+    resumed_by: Address,
+    next_due_ledger: u32,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "SubscriptionResumedV2"),),
+        (sub_id, resumed_by, next_due_ledger),
+    );
+}
+
+// ── #351: Recurring Payment Scheduler ────────────────────────────────────────
+
+pub fn emit_recurring_payment_executed(
+    e: &soroban_sdk::Env,
+    schedule_id: u32,
+    cycle: u32,
+    amount: i128,
+    next_due: u64,
+) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "RecurringExec"),),
+        (schedule_id, cycle, amount, next_due),
+    );
+}
+
+pub fn emit_recurring_payment_cancelled(e: &soroban_sdk::Env, schedule_id: u32, payer: soroban_sdk::Address) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "RecurringCancel"),),
+        (schedule_id, payer),
+    );
+}
+
+// ── #358: Buyer Trust Tier Events ────────────────────────────────────────────
+
+/// Event: Merchant updated a buyer's trust tier (#358)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BuyerTierUpdated {
+    pub merchant: Address,
+    pub buyer: Address,
+    pub old_tier: u32,
+    pub new_tier: u32,
+}
+
+pub fn emit_buyer_tier_updated(
+    e: &Env,
+    merchant: Address,
+    buyer: Address,
+    old_tier: u32,
+    new_tier: u32,
+) {
+    BuyerTierUpdated { merchant, buyer, old_tier, new_tier }.publish(e);
+}
+
+// ── #367: Dynamic Settlement Fee Tiers ───────────────────────────────────────
+
+/// Event: Fee tier applied during merchant settlement (#367)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TierFeeApplied {
+    pub merchant: Address,
+    pub tier_fee_bps: u32,
+    pub fee_collected: i128,
+    pub volume_30d: i128,
+}
+
+pub fn emit_tier_fee_applied(
+    e: &Env,
+    merchant: Address,
+    tier_fee_bps: u32,
+    fee_collected: i128,
+    volume_30d: i128,
+) {
+    TierFeeApplied { merchant, tier_fee_bps, fee_collected, volume_30d }.publish(e);
 }

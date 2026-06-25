@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String, Symbol, Vec};
 
 /// Event: Escrow created
 #[contractevent]
@@ -150,6 +150,39 @@ pub struct EscrowRefunded {
     pub escrow_id: u32,
     pub buyer: Address,
     pub amount: i128,
+}
+
+/// Event: Multi-seller escrow released with distributions (#317)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultiSellerEscrowReleased {
+    pub escrow_id: u32,
+    pub distributions: Vec<(Address, i128)>,
+}
+
+/// Event: Seller share delegated to another address (#317)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SellerShareDelegated {
+    pub escrow_id: u32,
+    pub original_seller: Address,
+    pub delegate: Address,
+}
+
+/// Event: Conditional release triggered by oracle (#318)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ConditionalReleaseTriggered {
+    pub escrow_id: u32,
+    pub oracle_contract: Address,
+    pub condition_value: i128,
+}
+
+/// Event: Release condition waived by mutual agreement (#318)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReleaseConditionWaived {
+    pub escrow_id: u32,
 }
 
 /// Event: Contract WASM upgraded
@@ -332,6 +365,54 @@ pub fn emit_escrow_released(e: &Env, escrow_id: u32, seller: Address, amount: i1
         amount,
     }
     .publish(e);
+}
+
+/// Event: Escrow receipt minted and assigned to seller
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptMinted {
+    pub receipt_id: u32,
+    pub escrow_id: u32,
+    pub seller: Address,
+}
+
+/// Event: Escrow receipt transferred to new holder
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptTransferred {
+    pub receipt_id: u32,
+    pub from: Address,
+    pub to: Address,
+}
+
+/// Event: Escrow receipt burned (on release or cancel)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowReceiptBurned {
+    pub receipt_id: u32,
+    pub escrow_id: u32,
+}
+
+pub fn emit_escrow_receipt_minted(e: &Env, receipt_id: u32, escrow_id: u32, seller: Address) {
+    EscrowReceiptMinted {
+        receipt_id,
+        escrow_id,
+        seller,
+    }
+    .publish(e);
+}
+
+pub fn emit_escrow_receipt_transferred(e: &Env, receipt_id: u32, from: Address, to: Address) {
+    EscrowReceiptTransferred {
+        receipt_id,
+        from,
+        to,
+    }
+    .publish(e);
+}
+
+pub fn emit_escrow_receipt_burned(e: &Env, receipt_id: u32, escrow_id: u32) {
+    EscrowReceiptBurned { receipt_id, escrow_id }.publish(e);
 }
 
 pub fn emit_partial_released(
@@ -621,6 +702,60 @@ pub fn emit_escrow_auto_renewed(
     .publish(e);
 }
 
+// --- Auto-Renewal Clause Events (recurring service agreements) ---
+
+/// Event: Escrow auto-renewed with renewal index tracking.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EscrowAutoRenewedV2 {
+    pub original_escrow_id: u32,
+    pub new_escrow_id: u32,
+    pub renewal_index: u32,
+}
+
+/// Event: Auto-renewal failed (e.g. insufficient buyer allowance).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct RenewalFailed {
+    pub escrow_id: u32,
+    pub renewal_index: u32,
+    pub reason: String,
+}
+
+/// Event: Buyer cancelled future auto-renewals for an escrow.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AutoRenewalCancelled {
+    pub escrow_id: u32,
+}
+
+pub fn emit_escrow_auto_renewed_v2(
+    e: &Env,
+    original_escrow_id: u32,
+    new_escrow_id: u32,
+    renewal_index: u32,
+) {
+    EscrowAutoRenewedV2 {
+        original_escrow_id,
+        new_escrow_id,
+        renewal_index,
+    }
+    .publish(e);
+}
+
+pub fn emit_renewal_failed(e: &Env, escrow_id: u32, renewal_index: u32, reason: String) {
+    RenewalFailed {
+        escrow_id,
+        renewal_index,
+        reason,
+    }
+    .publish(e);
+}
+
+pub fn emit_auto_renewal_cancelled(e: &Env, escrow_id: u32) {
+    AutoRenewalCancelled { escrow_id }.publish(e);
+}
+
 pub fn emit_buyer_role_transferred(
     e: &Env,
     escrow_id: u32,
@@ -840,6 +975,15 @@ pub fn emit_collateral_returned(e: &Env, escrow_id: u32, seller: Address, amount
     CollateralReturned { escrow_id, seller, amount }.publish(e);
 }
 
+// --- Issue #361: Collateral Health Alert ---
+
+pub fn emit_collateral_health_alert(e: &Env, escrow_id: u32, current_ratio_bps: u32, required_ratio_bps: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "CollateralHealthAlert"),),
+        (escrow_id, current_ratio_bps, required_ratio_bps),
+    );
+}
+
 // --- Issue #241: Delivery Proof Hash ---
 
 /// Event: Seller submitted a delivery proof; auto_released indicates if escrow was released.
@@ -976,6 +1120,716 @@ pub fn emit_multi_seller_escrow_created(
     MultiSellerEscrowCreated {
         escrow_id,
         sellers_count: sellers.len(),
+    }
+    .publish(e);
+}
+
+// --- Mutual Amendment Protocol Events ---
+
+/// Event: Amendment proposed by buyer or seller
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AmendmentProposed {
+    pub escrow_id: u32,
+    pub nonce: u32,
+    pub proposer: Address,
+    pub expires_at: u64,
+}
+
+/// Event: Amendment signed by a party
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AmendmentSigned {
+    pub escrow_id: u32,
+    pub nonce: u32,
+    pub signer: Address,
+}
+
+/// Event: Amendment applied after both parties signed
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AmendmentApplied {
+    pub escrow_id: u32,
+    pub nonce: u32,
+    pub old_amount: i128,
+    pub new_amount: i128,
+    pub old_deadline: u64,
+    pub new_deadline: u64,
+}
+
+/// Event: Amendment proposal cancelled
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AmendmentCancelled {
+    pub escrow_id: u32,
+    pub nonce: u32,
+    pub cancelled_by: Address,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_amendment_proposed(
+    e: &Env,
+    escrow_id: u32,
+    nonce: u32,
+    proposer: Address,
+    _new_amount: Option<i128>,
+    _new_deadline: Option<u64>,
+    _new_metadata_hash: Option<BytesN<32>>,
+    expires_at: u64,
+) {
+    AmendmentProposed {
+        escrow_id,
+        nonce,
+        proposer,
+        expires_at,
+    }
+    .publish(e);
+}
+
+pub fn emit_amendment_signed(e: &Env, escrow_id: u32, nonce: u32, signer: Address) {
+    AmendmentSigned {
+        escrow_id,
+        nonce,
+        signer,
+    }
+    .publish(e);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_amendment_applied(
+    e: &Env,
+    escrow_id: u32,
+    nonce: u32,
+    old_amount: i128,
+    new_amount: i128,
+    old_deadline: u64,
+    new_deadline: u64,
+    _old_metadata_hash: Option<BytesN<32>>,
+    _new_metadata_hash: Option<BytesN<32>>,
+) {
+    AmendmentApplied {
+        escrow_id,
+        nonce,
+        old_amount,
+        new_amount,
+        old_deadline,
+        new_deadline,
+    }
+    .publish(e);
+}
+
+pub fn emit_amendment_cancelled(e: &Env, escrow_id: u32, nonce: u32, cancelled_by: Address) {
+    AmendmentCancelled {
+        escrow_id,
+        nonce,
+        cancelled_by,
+    }
+    .publish(e);
+}
+
+// --- Inspector Events (#316) ---
+
+/// Event: Inspection result submitted
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InspectionResultSubmitted {
+    pub escrow_id: u32,
+    pub inspector: Address,
+    pub approved: bool,
+    pub report_hash: BytesN<32>,
+}
+
+/// Event: Inspector updated
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InspectorUpdated {
+    pub escrow_id: u32,
+    pub old_inspector: Address,
+    pub new_inspector: Address,
+}
+
+pub fn emit_inspection_result_submitted(
+    e: &Env,
+    escrow_id: u32,
+    inspector: Address,
+    approved: bool,
+    report_hash: BytesN<32>,
+) {
+    InspectionResultSubmitted {
+        escrow_id,
+        inspector,
+        approved,
+        report_hash,
+    }
+    .publish(e);
+}
+
+pub fn emit_multi_seller_escrow_released(
+    env: &Env,
+    escrow_id: u32,
+    distributions: Vec<(Address, i128)>,
+) {
+    MultiSellerEscrowReleased {
+        escrow_id,
+        distributions,
+    }
+    .publish(env);
+}
+
+pub fn emit_seller_share_delegated(
+    env: &Env,
+    escrow_id: u32,
+    original_seller: Address,
+    delegate: Address,
+) {
+    SellerShareDelegated {
+        escrow_id,
+        original_seller,
+        delegate,
+    }
+    .publish(env);
+}
+
+
+pub fn emit_conditional_release_triggered(
+    env: &Env,
+    escrow_id: u32,
+    oracle_contract: Address,
+    condition_value: i128,
+) {
+    ConditionalReleaseTriggered {
+        escrow_id,
+        oracle_contract,
+        condition_value,
+    }
+    .publish(env);
+}
+
+pub fn emit_release_condition_waived(env: &Env, escrow_id: u32) {
+    ReleaseConditionWaived { escrow_id }.publish(env);
+}
+
+// --- #272/#357: Inspector Events ---
+
+/// Event: Seller marked work complete; awaiting inspector (#272)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SellerMarkedComplete {
+    pub escrow_id: u32,
+    pub seller: Address,
+}
+
+/// Event: Inspector replaced by mutual agreement (#272)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InspectorReplaced {
+    pub escrow_id: u32,
+    pub old_inspector: Address,
+    pub new_inspector: Address,
+}
+
+/// Event: Inspection report submitted by inspector (#272)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InspectionReportSubmitted {
+    pub escrow_id: u32,
+    pub inspector: Address,
+    pub approved: bool,
+    pub report_hash: BytesN<32>,
+}
+
+/// Event: Inspector reputation score updated (#357)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct InspectorScoreUpdated {
+    pub inspector: Address,
+    pub total_rulings: u32,
+    pub correct_rulings: u32,
+    pub accuracy_bps: u32,
+}
+
+pub fn emit_seller_marked_complete(e: &Env, escrow_id: u32, seller: Address) {
+    SellerMarkedComplete { escrow_id, seller }.publish(e);
+}
+
+pub fn emit_inspector_replaced(e: &Env, escrow_id: u32, old_inspector: Address, new_inspector: Address) {
+    InspectorReplaced { escrow_id, old_inspector, new_inspector }.publish(e);
+}
+
+pub fn emit_inspection_report_submitted(
+    e: &Env,
+    escrow_id: u32,
+    inspector: Address,
+    approved: bool,
+    report_hash: BytesN<32>,
+) {
+    InspectionReportSubmitted { escrow_id, inspector, approved, report_hash }.publish(e);
+}
+
+pub fn emit_inspector_score_updated(
+    e: &Env,
+    inspector: Address,
+    total_rulings: u32,
+    correct_rulings: u32,
+    accuracy_bps: u32,
+) {
+    InspectorScoreUpdated { inspector, total_rulings, correct_rulings, accuracy_bps }.publish(e);
+}
+
+// ── #332: Milestone BPS Events ────────────────────────────────────────────────
+
+pub fn emit_milestone_submitted(e: &Env, escrow_id: u32, milestone_index: u32, delivery_hash: BytesN<32>) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "MilestoneSubmitted"),),
+        (escrow_id, milestone_index, delivery_hash),
+    );
+}
+
+pub fn emit_milestone_rejected(e: &Env, escrow_id: u32, milestone_index: u32) {
+    e.events().publish(
+        (soroban_sdk::Symbol::new(e, "MilestoneRejected"),),
+        (escrow_id, milestone_index),
+    );
+}
+
+/// Event: Seller acknowledged top-up
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TopUpAcknowledged {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub new_total: i128,
+}
+
+pub fn emit_top_up_acknowledged(
+    e: &Env,
+    escrow_id: u32,
+    seller: Address,
+    new_total: i128,
+) {
+    TopUpAcknowledged {
+        escrow_id,
+        seller,
+        new_total,
+    }
+    .publish(e);
+}
+
+pub fn emit_inspector_updated(
+    e: &Env,
+    escrow_id: u32,
+    old_inspector: Address,
+    new_inspector: Address,
+) {
+    InspectorUpdated {
+        escrow_id,
+        old_inspector,
+        new_inspector,
+    }
+    .publish(e);
+}
+
+/// Event: Partial release requested by seller
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialReleaseRequested {
+    pub escrow_id: u32,
+    pub request_id: u64,
+    pub seller: Address,
+    pub amount: i128,
+}
+
+pub fn emit_partial_release_requested(
+    e: &Env,
+    escrow_id: u32,
+    request_id: u64,
+    seller: Address,
+    amount: i128,
+) {
+    PartialReleaseRequested {
+        escrow_id,
+        request_id,
+        seller,
+        amount,
+    }
+    .publish(e);
+}
+
+/// Event: Partial release approved by buyer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialReleaseApproved {
+    pub escrow_id: u32,
+    pub request_id: u64,
+    pub amount: i128,
+}
+
+pub fn emit_partial_release_approved(
+    e: &Env,
+    escrow_id: u32,
+    request_id: u64,
+    amount: i128,
+) {
+    PartialReleaseApproved {
+        escrow_id,
+        request_id,
+        amount,
+    }
+    .publish(e);
+}
+
+/// Event: Partial release rejected by buyer
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PartialReleaseRejected {
+    pub escrow_id: u32,
+    pub request_id: u64,
+}
+
+pub fn emit_partial_release_rejected(
+    e: &Env,
+    escrow_id: u32,
+    request_id: u64,
+) {
+    PartialReleaseRejected {
+        escrow_id,
+        request_id,
+    }
+    .publish(e);
+}
+
+// ── #319: Bounty Board Events ─────────────────────────────────────────────────
+
+/// Event: Bounty created with open competitive work assignment
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyCreated {
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub description_hash: BytesN<32>,
+    pub claim_deadline_ledger: u64,
+    pub submission_deadline_ledger: u64,
+}
+
+/// Event: Bounty claimed by a solver
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyClaimed {
+    pub escrow_id: u32,
+    pub solver: Address,
+}
+
+/// Event: Bounty work submitted by solver
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyWorkSubmitted {
+    pub escrow_id: u32,
+    pub solver: Address,
+    pub submission_hash: BytesN<32>,
+}
+
+/// Event: Bounty submission approved and funds awarded to solver
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyAwarded {
+    pub escrow_id: u32,
+    pub solver: Address,
+    pub amount: i128,
+}
+
+/// Event: Bounty submission rejected and bounty re-opened
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyRejected {
+    pub escrow_id: u32,
+    pub solver: Address,
+    pub rejection_count: u32,
+}
+
+/// Event: Bounty cancelled by buyer (no claims or after max rejections)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyCancelled {
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub refund_amount: i128,
+}
+
+pub fn emit_bounty_created(
+    e: &Env,
+    escrow_id: u32,
+    buyer: Address,
+    amount: i128,
+    token: Address,
+    description_hash: BytesN<32>,
+    claim_deadline_ledger: u64,
+    submission_deadline_ledger: u64,
+) {
+    BountyCreated {
+        escrow_id,
+        buyer,
+        amount,
+        token,
+        description_hash,
+        claim_deadline_ledger,
+        submission_deadline_ledger,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_claimed(e: &Env, escrow_id: u32, solver: Address) {
+    BountyClaimed { escrow_id, solver }.publish(e);
+}
+
+pub fn emit_bounty_work_submitted(
+    e: &Env,
+    escrow_id: u32,
+    solver: Address,
+    submission_hash: BytesN<32>,
+) {
+    BountyWorkSubmitted {
+        escrow_id,
+        solver,
+        submission_hash,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_awarded(e: &Env, escrow_id: u32, solver: Address, amount: i128) {
+    BountyAwarded {
+        escrow_id,
+        solver,
+        amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_rejected(e: &Env, escrow_id: u32, solver: Address, rejection_count: u32) {
+    BountyRejected {
+        escrow_id,
+        solver,
+        rejection_count,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_cancelled(e: &Env, escrow_id: u32, buyer: Address, refund_amount: i128) {
+    BountyCancelled {
+        escrow_id,
+        buyer,
+        refund_amount,
+    }
+    .publish(e);
+}
+
+// ── #350: Multi-Party N-of-M Release Approval ─────────────────────────────────
+
+/// Event: An approver signed off on releasing escrow funds
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MultiPartyApproval {
+    pub escrow_id: u32,
+    pub approver: Address,
+    pub approvals_count: u32,
+    pub threshold: u32,
+}
+
+pub fn emit_multi_party_approval(
+    e: &Env,
+    escrow_id: u32,
+    approver: Address,
+    approvals_count: u32,
+    threshold: u32,
+) {
+    MultiPartyApproval {
+        escrow_id,
+        approver,
+        approvals_count,
+        threshold,
+    }
+    .publish(e);
+}
+
+// ── #353: Time-Locked Staged Release Events ───────────────────────────────────
+
+/// Event: A scheduled release tranche was claimed by the beneficiary
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ScheduledReleaseExecuted {
+    pub escrow_id: u32,
+    pub tranche_index: u32,
+    pub amount: i128,
+    pub remaining_tranches: u32,
+}
+
+pub fn emit_scheduled_release_executed(
+    e: &Env,
+    escrow_id: u32,
+    tranche_index: u32,
+    amount: i128,
+    remaining_tranches: u32,
+) {
+    ScheduledReleaseExecuted {
+        escrow_id,
+        tranche_index,
+        amount,
+        remaining_tranches,
+    }
+    .publish(e);
+}
+
+// ── #366: Seller Veto Override Events ────────────────────────────────────────
+
+/// Event: Seller raised a veto blocking fund release (#366)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SellerVetoRaised {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub veto_timestamp: u64,
+}
+
+/// Event: Seller cancelled their veto before the override window elapsed (#366)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SellerVetoCancelled {
+    pub escrow_id: u32,
+    pub seller: Address,
+}
+
+/// Event: Admin overrode the seller veto after the window elapsed (#366)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VetoOverridden {
+    pub escrow_id: u32,
+    pub admin: Address,
+    pub reason_hash: BytesN<32>,
+    pub elapsed_seconds: u64,
+}
+
+pub fn emit_seller_veto_raised(e: &Env, escrow_id: u32, seller: Address, veto_timestamp: u64) {
+    SellerVetoRaised { escrow_id, seller, veto_timestamp }.publish(e);
+}
+
+pub fn emit_seller_veto_cancelled(e: &Env, escrow_id: u32, seller: Address) {
+    SellerVetoCancelled { escrow_id, seller }.publish(e);
+}
+
+pub fn emit_veto_overridden(
+    e: &Env,
+    escrow_id: u32,
+    admin: Address,
+    reason_hash: BytesN<32>,
+    elapsed_seconds: u64,
+) {
+    VetoOverridden { escrow_id, admin, reason_hash, elapsed_seconds }.publish(e);
+}
+
+// ── #376: Bounty Board Milestone Gating Events ───────────────────────────────
+
+/// Event: A milestone-gated bounty was created.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyMilestoneCreated {
+    pub escrow_id: u32,
+    pub buyer: Address,
+    pub milestone_count: u32,
+    pub total_amount: i128,
+}
+
+/// Event: A bounty milestone deliverable was submitted by the solver.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyMilestoneSubmitted {
+    pub escrow_id: u32,
+    pub index: u32,
+    pub solver: Address,
+    pub deliverable_hash: BytesN<32>,
+}
+
+/// Event: A bounty milestone was verified by its designated verifier and the
+/// corresponding tranche released to the solver.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MilestoneVerified {
+    pub escrow_id: u32,
+    pub index: u32,
+    pub amount: i128,
+    pub verifier: Address,
+}
+
+/// Event: The designated verifier for a still-pending milestone was replaced.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BountyVerifierReplaced {
+    pub escrow_id: u32,
+    pub index: u32,
+    pub old_verifier: Address,
+    pub new_verifier: Address,
+}
+
+pub fn emit_bounty_milestone_created(
+    e: &Env,
+    escrow_id: u32,
+    buyer: Address,
+    milestone_count: u32,
+    total_amount: i128,
+) {
+    BountyMilestoneCreated {
+        escrow_id,
+        buyer,
+        milestone_count,
+        total_amount,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_milestone_submitted(
+    e: &Env,
+    escrow_id: u32,
+    index: u32,
+    solver: Address,
+    deliverable_hash: BytesN<32>,
+) {
+    BountyMilestoneSubmitted {
+        escrow_id,
+        index,
+        solver,
+        deliverable_hash,
+    }
+    .publish(e);
+}
+
+pub fn emit_milestone_verified(
+    e: &Env,
+    escrow_id: u32,
+    index: u32,
+    amount: i128,
+    verifier: Address,
+) {
+    MilestoneVerified {
+        escrow_id,
+        index,
+        amount,
+        verifier,
+    }
+    .publish(e);
+}
+
+pub fn emit_bounty_milestone_verifier_replaced(
+    e: &Env,
+    escrow_id: u32,
+    index: u32,
+    old_verifier: Address,
+    new_verifier: Address,
+) {
+    BountyVerifierReplaced {
+        escrow_id,
+        index,
+        old_verifier,
+        new_verifier,
     }
     .publish(e);
 }

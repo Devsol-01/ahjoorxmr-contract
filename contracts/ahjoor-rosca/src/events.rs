@@ -42,6 +42,14 @@ pub struct RoundClosed {
     pub defaulters: Vec<Address>,
 }
 
+/// Event: Payout order finalized via randomization (#315)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PayoutOrderFinalized {
+    pub round: u32,
+    pub payout_order: Vec<Address>,
+}
+
 /// Event: Member defaulted on a round
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -435,6 +443,10 @@ pub fn emit_milestone(e: &Env, milestone: u32, total_collected: i128) {
 
 pub fn emit_closed(e: &Env, round: u32, defaulters: Vec<Address>) {
     RoundClosed { round, defaulters }.publish(e);
+}
+
+pub fn emit_payout_order_finalized(e: &Env, round: u32, payout_order: Vec<Address>) {
+    PayoutOrderFinalized { round, payout_order }.publish(e);
 }
 
 pub fn emit_defaulted(
@@ -1218,6 +1230,73 @@ pub fn emit_co_signer_contributed(e: &Env, group_id: u32, member: Address, co_si
 pub fn emit_co_signer_window_expired(e: &Env, group_id: u32, member: Address) {
     e.events().publish((soroban_sdk::Symbol::new(e, "CoSignerWinExpired"),), (group_id, member));
 }
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProxyAuthorized {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+    pub max_rounds: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProxyContributed {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+    pub round_index: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProxyRevoked {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+}
+
+pub fn emit_proxy_authorized(
+    e: &Env,
+    group_id: u32,
+    member: Address,
+    proxy: Address,
+    max_rounds: u32,
+) {
+    ProxyAuthorized {
+        group_id,
+        member,
+        proxy,
+        max_rounds,
+    }
+    .publish(e);
+}
+
+pub fn emit_proxy_contributed(
+    e: &Env,
+    group_id: u32,
+    member: Address,
+    proxy: Address,
+    round_index: u32,
+) {
+    ProxyContributed {
+        group_id,
+        member,
+        proxy,
+        round_index,
+    }
+    .publish(e);
+}
+
+pub fn emit_proxy_revoked(e: &Env, group_id: u32, member: Address, proxy: Address) {
+    ProxyRevoked {
+        group_id,
+        member,
+        proxy,
+    }
+    .publish(e);
+}
 // #236: Group Activity Freeze Events
 
 /// Event: Group frozen by contract-level admin
@@ -1316,4 +1395,429 @@ pub struct CreditScoreUpdated {
 
 pub fn emit_credit_score_updated(e: &Env, member: Address, old_score: i128, new_score: i128, reason: soroban_sdk::Symbol) {
     CreditScoreUpdated { member, old_score, new_score, reason }.publish(e);
+}
+
+// ── #330: Contribution Delegation Events ─────────────────────────────────────
+
+/// Event: Member granted contribution delegation to a proxy (#330)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct DelegationGranted {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+    pub expiry_ledger: u64,
+}
+
+/// Event: Member revoked contribution delegation (#330)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContribDelegationRevoked {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+}
+
+pub fn emit_delegation_granted(e: &Env, group_id: u32, member: Address, proxy: Address, expiry_ledger: u64) {
+    DelegationGranted { group_id, member, proxy, expiry_ledger }.publish(e);
+}
+
+pub fn emit_contribution_delegation_revoked(e: &Env, group_id: u32, member: Address, proxy: Address) {
+    ContribDelegationRevoked { group_id, member, proxy }.publish(e);
+}
+
+// ── #331: Group Split Events ──────────────────────────────────────────────────
+
+/// Event: Group split proposed (#331)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GroupSplitProposed {
+    pub source_group_id: u32,
+    pub proposal_id: u32,
+}
+
+/// Event: Group split executed (#331)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct GroupSplitExecuted {
+    pub source_group_id: u32,
+    pub group_a_id: u32,
+    pub group_b_id: u32,
+}
+
+pub fn emit_group_split_proposed(e: &Env, source_group_id: u32, proposal_id: u32) {
+    GroupSplitProposed { source_group_id, proposal_id }.publish(e);
+}
+
+pub fn emit_group_split_executed(e: &Env, source_group_id: u32, group_a_id: u32, group_b_id: u32) {
+    GroupSplitExecuted { source_group_id, group_a_id, group_b_id }.publish(e);
+}
+
+
+/// Event: Group treasury enabled (#314)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryEnabled {
+    pub group_id: u32,
+    pub treasury_admin: Address,
+}
+
+/// Event: Treasury round proposed (#314)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryRoundProposed {
+    pub group_id: u32,
+    pub round_index: u32,
+}
+
+/// Event: Treasury round confirmed by majority vote (#314)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryRoundConfirmed {
+    pub group_id: u32,
+    pub round_index: u32,
+}
+
+/// Event: Treasury payment executed (#314)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct TreasuryPaymentExecuted {
+    pub group_id: u32,
+    pub recipient: Address,
+    pub amount: i128,
+}
+
+
+pub fn emit_treasury_enabled(env: &Env, treasury_admin: Address) {
+    TreasuryEnabled { group_id: 0, treasury_admin }.publish(env);
+}
+
+pub fn emit_treasury_round_proposed(env: &Env, round_index: u32) {
+    TreasuryRoundProposed { group_id: 0, round_index }.publish(env);
+}
+
+pub fn emit_treasury_round_confirmed(env: &Env, round_index: u32) {
+    TreasuryRoundConfirmed { group_id: 0, round_index }.publish(env);
+}
+
+pub fn emit_treasury_payment_executed(env: &Env, recipient: Address, amount: i128) {
+    TreasuryPaymentExecuted { group_id: 0, recipient, amount }.publish(env);
+}
+
+// --- Emergency Liquidity Reserve Events (#313) ---
+
+/// Event: Emergency loan granted
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EmergencyLoanGranted {
+    pub group_id: u32,
+    pub member: Address,
+    pub loan_id: u32,
+    pub amount: i128,
+    pub repayment_deadline: u32,
+}
+
+/// Event: Emergency loan repaid
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct EmergencyLoanRepaid {
+    pub group_id: u32,
+    pub loan_id: u32,
+    pub amount: i128,
+    pub remaining: i128,
+}
+
+/// Event: Loan default deducted from payout
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LoanDefaultDeducted {
+    pub group_id: u32,
+    pub loan_id: u32,
+    pub deducted_from_payout: i128,
+}
+
+pub fn emit_emergency_loan_granted(
+    e: &Env,
+    group_id: u32,
+    member: Address,
+    loan_id: u32,
+    amount: i128,
+    repayment_deadline: u32,
+) {
+    EmergencyLoanGranted {
+        group_id,
+        member,
+        loan_id,
+        amount,
+        repayment_deadline,
+    }
+    .publish(e);
+}
+
+pub fn emit_emergency_loan_repaid(e: &Env, group_id: u32, loan_id: u32, amount: i128, remaining: i128) {
+    EmergencyLoanRepaid {
+        group_id,
+        loan_id,
+        amount,
+        remaining,
+    }
+    .publish(e);
+}
+
+pub fn emit_loan_default_deducted(e: &Env, group_id: u32, loan_id: u32, deducted_from_payout: i128) {
+    LoanDefaultDeducted {
+        group_id,
+        loan_id,
+        deducted_from_payout,
+    }
+    .publish(e);
+}
+
+// ── #352: Contribution Rebalancing ───────────────────────────────────────────
+
+/// Event: Per-member contribution amount rebalanced after membership change (#352)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ContributionRebalanced {
+    pub old_amount: i128,
+    pub new_amount: i128,
+    pub reason: soroban_sdk::Symbol,
+}
+
+pub fn emit_contribution_rebalanced(
+    e: &Env,
+    old_amount: i128,
+    new_amount: i128,
+    reason: soroban_sdk::Symbol,
+) {
+    ContributionRebalanced {
+        old_amount,
+        new_amount,
+        reason,
+    }
+    .publish(e);
+}
+
+// ── #356: Penalty-Based Slot Demotion ────────────────────────────────────────
+
+/// Event: A member was demoted to the back of the payout queue after reaching
+/// the configured late-contribution threshold (#356).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MemberDemoted {
+    pub member: Address,
+    pub new_slot_index: u32,
+    pub late_count: u32,
+}
+
+pub fn emit_member_demoted(e: &Env, member: Address, new_slot_index: u32, late_count: u32) {
+    MemberDemoted {
+        member,
+        new_slot_index,
+        late_count,
+    }
+    .publish(e);
+}
+
+/// Event: A member's late-contribution count was reset due to consecutive on-time payments.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct LateCountReset {
+    pub member: Address,
+}
+
+pub fn emit_late_count_reset(e: &Env, member: Address) {
+    LateCountReset { member }.publish(e);
+}
+
+// ── #364: Cycle Snapshot Versioning ──────────────────────────────────────────
+
+/// Event: Automated cycle snapshot created at cycle end (#364)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SnapshotCreated {
+    pub group_id: u32,
+    pub cycle_number: u32,
+    pub snapshot_hash: BytesN<32>,
+}
+
+pub fn emit_snapshot_created(e: &Env, group_id: u32, cycle_number: u32, snapshot_hash: BytesN<32>) {
+    SnapshotCreated { group_id, cycle_number, snapshot_hash }.publish(e);
+}
+
+// ── #359: Savings Goal Milestone Rewards ─────────────────────────────────────
+
+/// Event: Member reached a savings goal milestone and received a reward (#359)
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MilestoneReached {
+    pub group_id: u32,
+    pub member: Address,
+    pub milestone_pct: u32,
+    pub reward_amount: i128,
+}
+
+pub fn emit_milestone_reached(
+    e: &Env,
+    group_id: u32,
+    member: Address,
+    milestone_pct: u32,
+    reward_amount: i128,
+) {
+    MilestoneReached { group_id, member, milestone_pct, reward_amount }.publish(e);
+}
+
+// ── #375: Sealed-Bid (Commit-Reveal) Slot Auction Events ──────────────────────
+
+/// Event: A sealed-bid auction was opened with commit/reveal deadlines.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SealedAuctionOpened {
+    pub group_id: u32,
+    pub round: u32,
+    pub commit_until: u64,
+    pub reveal_until: u64,
+}
+
+/// Event: A sealed bid was committed (hash only; amount stays hidden).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlotBidCommitted {
+    pub group_id: u32,
+    pub round: u32,
+    pub bidder: Address,
+}
+
+/// Event: A previously committed sealed bid was revealed and validated.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlotBidRevealed {
+    pub group_id: u32,
+    pub round: u32,
+    pub bidder: Address,
+    pub desired_slot: u32,
+    pub bid_amount: i128,
+}
+
+/// Event: A sealed-bid auction was settled. `winning_bid` is 0 when no bid
+/// cleared the minimum reserve (slot left unallocated).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SealedAuctionSettled {
+    pub group_id: u32,
+    pub round: u32,
+    pub winner: Address,
+    pub winning_bid: i128,
+}
+
+pub fn emit_sealed_auction_opened(
+    e: &Env,
+    group_id: u32,
+    round: u32,
+    commit_until: u64,
+    reveal_until: u64,
+) {
+    SealedAuctionOpened { group_id, round, commit_until, reveal_until }.publish(e);
+}
+
+pub fn emit_slot_bid_committed(e: &Env, group_id: u32, round: u32, bidder: Address) {
+    SlotBidCommitted { group_id, round, bidder }.publish(e);
+}
+
+pub fn emit_slot_bid_revealed(
+    e: &Env,
+    group_id: u32,
+    round: u32,
+    bidder: Address,
+    desired_slot: u32,
+    bid_amount: i128,
+) {
+    SlotBidRevealed { group_id, round, bidder, desired_slot, bid_amount }.publish(e);
+}
+
+pub fn emit_sealed_auction_settled(
+    e: &Env,
+    group_id: u32,
+    round: u32,
+    winner: Address,
+    winning_bid: i128,
+) {
+    SealedAuctionSettled { group_id, round, winner, winning_bid }.publish(e);
+}
+
+
+// --- Slot Auction Events (open auction variant) ---
+
+/// Event: A bid was placed in an open slot auction
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlotBidPlaced {
+    pub group_id: u32,
+    pub bidder: Address,
+    pub desired_slot: u32,
+    pub bid_amount: i128,
+}
+
+pub fn emit_slot_bid_placed(e: &Env, group_id: u32, bidder: Address, desired_slot: u32, bid_amount: i128) {
+    SlotBidPlaced { group_id, bidder, desired_slot, bid_amount }.publish(e);
+}
+
+/// Event: An open slot auction was resolved
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SlotAuctionResolved {
+    pub group_id: u32,
+    pub winner: Address,
+    pub slot: u32,
+    pub winning_bid: i128,
+    pub bonus_per_member: i128,
+}
+
+pub fn emit_slot_auction_resolved(e: &Env, group_id: u32, winner: Address, slot: u32, winning_bid: i128, bonus_per_member: i128) {
+    SlotAuctionResolved { group_id, winner, slot, winning_bid, bonus_per_member }.publish(e);
+}
+
+// --- Cross-Group Migration Events ---
+
+/// Event: A member requested migration to another group
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MigrationRequested {
+    pub member: Address,
+    pub src_contract: Address,
+    pub to_group: Address,
+}
+
+pub fn emit_migration_requested(e: &Env, member: Address, src_contract: Address, to_group: Address) {
+    MigrationRequested { member, src_contract, to_group }.publish(e);
+}
+
+/// Event: A member migration was executed into this group
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct MigrationExecuted {
+    pub member: Address,
+    pub from_group: Address,
+    pub dest_contract: Address,
+    pub target_slot: u32,
+}
+
+pub fn emit_migration_executed(e: &Env, member: Address, from_group: Address, dest_contract: Address, target_slot: u32) {
+    MigrationExecuted { member, from_group, dest_contract, target_slot }.publish(e);
+}
+
+// --- Proxy Authorization Events ---
+
+/// Event: A proxy authorization has expired
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ProxyExpired {
+    pub group_id: u32,
+    pub member: Address,
+    pub proxy: Address,
+    pub expiry_ledger: u64,
+}
+
+pub fn emit_proxy_expired(e: &Env, group_id: u32, member: Address, proxy: Address, expiry_ledger: u64) {
+    ProxyExpired { group_id, member, proxy, expiry_ledger }.publish(e);
 }

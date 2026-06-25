@@ -53,6 +53,13 @@ fn test_per_type_quorum_enforced() {
             skip_fee: 0,
             max_skips_per_cycle: 0,
             voting_mode: VotingMode::Equal,
+        late_fee_bps: 0,
+        grace_period_seconds: 0,
+        auction_enabled: false,
+        auction_window_ledgers: 0,
+        randomize_payout_order: false,
+        reserve_enabled: false,
+        reserve_contribution_bps: 0,
         },
         &None,
     );
@@ -145,6 +152,13 @@ fn test_proposal_respects_quorum_at_creation() {
             skip_fee: 0,
             max_skips_per_cycle: 0,
             voting_mode: VotingMode::Equal,
+        late_fee_bps: 0,
+        grace_period_seconds: 0,
+        auction_enabled: false,
+        auction_window_ledgers: 0,
+        randomize_payout_order: false,
+        reserve_enabled: false,
+        reserve_contribution_bps: 0,
         }, &None);
 
     let creator = members.get(0).unwrap();

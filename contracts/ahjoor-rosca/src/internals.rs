@@ -1,5 +1,5 @@
-use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, DataKey, DataKey2, DataKey3, PersistentKey, PayoutRecord, types::{InsuranceClaim, InsuranceCoverageMode}};
-use soroban_sdk::{panic_with_error, token, Address, Env, Map, Vec};
+use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 /// Returns the timestamp (seconds) after which the grace period for a given round deadline expires.
 ///
@@ -136,6 +136,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
 
     let mut total_payout_history_amt = 0i128;
     let mut reinvested_amount = 0i128;
+    let mut total_fee_collected = 0i128;
 
     // Calculate expected pot based on member tiers and check for shortfall
     let base_amount: i128 = env
@@ -269,6 +270,7 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
                     
                     // Emit fee collected event (only for base token to avoid duplicates)
                     if token_addr == base_token {
+                        total_fee_collected = fee_amount;
                         events::emit_fee_collected(env, current_round, fee_amount, fee_recipient);
                     }
                 }
@@ -301,6 +303,127 @@ pub(crate) fn complete_round_payout(env: &Env, _paid_members: &Vec<Address>) {
         payout_recipient.clone(),
         total_payout_history_amt,
     );
+
+    // #364: Create immutable cycle snapshot before state is reset
+    {
+        let snap_members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .unwrap_or(Vec::new(env));
+        let mut preimage = Bytes::new(env);
+        preimage.extend_from_array(&current_round.to_be_bytes());
+        preimage.extend_from_array(&total_payout_history_amt.to_be_bytes());
+        preimage.extend_from_array(&(payout_order.len() as u32).to_be_bytes());
+        let snap_hash: BytesN<32> = env.crypto().sha256(&preimage).into();
+        let cycle_snapshot = CycleSnapshotData {
+            cycle_number: current_round,
+            members: snap_members,
+            contribution_amounts: member_contributions.clone(),
+            payout_queue: payout_order.clone(),
+            pool_balance: total_payout_history_amt,
+            timestamp: env.ledger().timestamp(),
+            snapshot_hash: snap_hash.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&PersistentKey::CycleSnapshot(current_round), &cycle_snapshot);
+        env.storage().persistent().extend_ttl(
+            &PersistentKey::CycleSnapshot(current_round),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_snapshot_created(env, 0u32, current_round, snap_hash);
+    }
+
+    // ── Issue #402: Record cycle audit trail with proper timestamps ────────────
+    // Collect contribution entries for audit trail
+    let mut contributions: Vec<ContributionEntry> = Vec::new(env);
+    for (member, amount) in member_contributions.iter() {
+        contributions.push_back(ContributionEntry {
+            member: member.clone(),
+            amount,
+        });
+    }
+
+    // Get defaulters from storage (set during finalize_round)
+    let defaulters: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Defaulters)
+        .unwrap_or(Vec::new(env));
+
+    // Get skippers for this round
+    let skip_requests: Map<(Address, u32), bool> = env
+        .storage()
+        .instance()
+        .get(&DataKey2::SkipRequests)
+        .unwrap_or(Map::new(env));
+    let mut skippers: Vec<Address> = Vec::new(env);
+    for (key, skipped) in skip_requests.iter() {
+        let (addr, round_num) = key;
+        if skipped && round_num == current_round {
+            skippers.push_back(addr);
+        }
+    }
+
+    // Get cycle timestamps with ledger-mode fix for non-zero values
+    let use_timestamp_schedule: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::UseTimestampSchedule)
+        .unwrap_or(false);
+
+    let cycle_end_timestamp = if use_timestamp_schedule {
+        env.ledger().timestamp()
+    } else {
+        // In ledger-mode, use sequence number as timestamp (fixes Issue #402)
+        env.ledger().sequence() as u64
+    };
+
+    let cycle_start_timestamp = audit_trail::get_cycle_start_timestamp(env, current_round);
+
+    // Get penalty and insurance amounts from storage
+    let penalty_amount: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::PenaltyAmount)
+        .unwrap_or(0);
+    let insurance_pool: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey2::InsurancePool)
+        .unwrap_or(0);
+
+    // Calculate penalties collected and insurance drawn from events/defaults
+    // (This is conservative; actual penalties are applied per defaulter)
+    let penalties_collected = if !defaulters.is_empty() {
+        (defaulters.len() as i128) * penalty_amount
+    } else {
+        0
+    };
+
+    // Insurance drawn is available from previous insurance balance - current balance
+    // For this round, we track what was drawn via events; default to 0 if not tracked separately
+    let insurance_drawn = 0i128;
+
+    // Record the cycle audit trail
+    audit_trail::record_cycle_audit(
+        env,
+        current_round,
+        total_payout_history_amt,
+        payout_recipient,
+        total_payout_history_amt,
+        contributions,
+        defaulters,
+        skippers,
+        penalties_collected,
+        total_fee_collected,
+        insurance_drawn,
+        cycle_start_timestamp,
+        cycle_end_timestamp,
+    );
+
     reset_round_state(env, current_round);
 
     // Apply reinvestment to the next round's contributions
@@ -384,9 +507,10 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
     } else {
         env.storage().instance().get(&DataKey::RoundDuration).unwrap()
     };
+    let new_round = current_round + 1;
     env.storage()
         .instance()
-        .set(&DataKey::CurrentRound, &(current_round + 1));
+        .set(&DataKey::CurrentRound, &new_round);
     env.storage()
         .instance()
         .set(&DataKey::PaidMembers, &Vec::<Address>::new(env));
@@ -416,7 +540,62 @@ pub(crate) fn reset_round_state(env: &Env, current_round: u32) {
         env.storage()
             .instance()
             .set(&DataKey::RoundDeadlineTimestamp, &next_timestamp_deadline);
-        events::emit_round_deadline_timestamp_set(env, current_round + 1, next_timestamp_deadline);
+        events::emit_round_deadline_timestamp_set(env, new_round, next_timestamp_deadline);
+    }
+
+    // ── Issue #402: Record cycle start timestamp when a new cycle begins ─────────
+    let payout_order: Vec<Address> = env
+        .storage()
+        .instance()
+        .get(&DataKey::PayoutOrder)
+        .unwrap_or(Vec::new(env));
+    let cycle_len = payout_order.len() as u32;
+    if cycle_len > 0 && new_round % cycle_len == 0 {
+        // New cycle starts, record the timestamp with ledger-mode fix
+        let cycle_number = new_round / cycle_len;
+        let cycle_start_timestamp = if use_timestamp {
+            env.ledger().timestamp()
+        } else {
+            // In ledger-mode, use sequence number as timestamp (fixes Issue #402)
+            env.ledger().sequence() as u64
+        };
+        audit_trail::record_cycle_start(env, cycle_number, cycle_start_timestamp);
+    }
+
+    // Slot Auction: open a new auction at the start of each cycle
+    let auction_enabled: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey3::AuctionEnabled)
+        .unwrap_or(false);
+    if auction_enabled {
+        let payout_order_len: u32 = {
+            let order: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey::PayoutOrder)
+                .unwrap_or(Vec::new(env));
+            order.len() as u32
+        };
+        let is_cycle_start = payout_order_len > 0 && new_round % payout_order_len == 0;
+        if is_cycle_start {
+            let window: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey3::AuctionWindowLedgers)
+                .unwrap_or(0);
+            let open_until = env.ledger().timestamp() + window;
+            env.storage()
+                .instance()
+                .set(&DataKey3::AuctionOpenUntil, &open_until);
+            // Clear any leftover bids from a previous auction
+            env.storage()
+                .instance()
+                .set(&DataKey3::AuctionBids, &Vec::<SlotBid>::new(env));
+            env.storage()
+                .instance()
+                .set(&DataKey3::AuctionRound, &new_round);
+        }
     }
 
     events::emit_reset(env, current_round);

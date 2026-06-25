@@ -4340,88 +4340,45 @@ fn test_authorize_payment_succeeds() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
 
     let payment = s.client.get_payment(&pid);
     assert_eq!(payment.status, PaymentStatus::Authorized);
-    assert_eq!(payment.capture_deadline, 4600); // 1000 + 3600
+    assert_eq!(payment.capture_deadline, 200);
     assert_eq!(s.token_client.balance(&s.client.address), 300);
+    assert_eq!(s.token_client.balance(&customer), 700);
     assert_eq!(s.token_client.balance(&merchant), 0);
 }
 
 #[test]
-#[should_panic(expected = "Only the payment merchant can authorize")]
-fn test_authorize_payment_non_merchant_panics() {
+#[should_panic(expected = "capture_deadline_ledger must be in the future")]
+fn test_authorize_payment_past_deadline_panics() {
     let s = setup();
     s.init();
     let customer = Address::generate(&s.env);
     let merchant = Address::generate(&s.env);
-    let stranger = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.client.authorize_payment(&stranger, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    s.client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &100u64);
 }
 
 #[test]
-#[should_panic(expected = "capture_window_seconds must be positive")]
-fn test_authorize_payment_zero_window_panics() {
+#[should_panic(expected = "Payment amount must be positive")]
+fn test_authorize_payment_zero_amount_panics() {
     let s = setup();
     s.init();
     let customer = Address::generate(&s.env);
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.client.authorize_payment(&merchant, &pid, &0u64);
-}
-
-#[test]
-#[should_panic(expected = "Only pending payments can be authorized")]
-fn test_authorize_already_completed_panics() {
-    let s = setup();
-    s.init();
-    let customer = Address::generate(&s.env);
-    let merchant = Address::generate(&s.env);
-    s.token_admin_client.mint(&customer, &1000);
-
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.client.complete_payment(&pid);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    s.client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &0, &200u64);
 }
 
 #[test]
@@ -4432,19 +4389,12 @@ fn test_capture_authorized_payment_within_window() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
 
-    s.env.ledger().set_timestamp(2000);
+    s.env.ledger().set_sequence_number(150);
     s.client.capture_payment(&merchant, &pid);
 
     let payment = s.client.get_payment(&pid);
@@ -4454,7 +4404,6 @@ fn test_capture_authorized_payment_within_window() {
 }
 
 #[test]
-#[should_panic(expected = "Capture window has expired")]
 fn test_capture_after_deadline_panics() {
     let s = setup();
     s.init();
@@ -4462,20 +4411,14 @@ fn test_capture_after_deadline_panics() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
 
-    s.env.ledger().set_timestamp(5000); // past deadline (4600)
-    s.client.capture_payment(&merchant, &pid);
+    s.env.ledger().set_sequence_number(201); // post deadline
+    let res = s.client.try_capture_payment(&merchant, &pid);
+    assert_eq!(res.unwrap_err().unwrap(), Error::CapturePastDeadline.into());
 }
 
 #[test]
@@ -4507,20 +4450,12 @@ fn test_expire_authorized_payment_refunds_customer() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
 
-    // Advance past capture_deadline
-    s.env.ledger().set_timestamp(5000);
+    s.env.ledger().set_sequence_number(201);
     s.client.expire_payment(&pid);
 
     let payment = s.client.get_payment(&pid);
@@ -4538,16 +4473,10 @@ fn test_dispute_authorized_payment() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
 
     let reason = String::from_str(&s.env, "Unauthorized charge");
     s.client.dispute_payment(&customer, &pid, &reason);
@@ -4564,31 +4493,15 @@ fn test_bulk_expire_authorized_payments() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid0 = s.client.create_payment(
-        &customer,
-        &merchant,
-        &100,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    let pid1 = s.client.create_payment(
-        &customer,
-        &merchant,
-        &200,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
+    s.env.ledger().set_sequence_number(100);
+    let pid0 = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &100, &200u64);
+    let pid1 = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &200, &200u64);
 
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid0, &3600u64);
-    s.client.authorize_payment(&merchant, &pid1, &3600u64);
-
-    // Advance past both capture_deadlines
-    s.env.ledger().set_timestamp(5000);
+    s.env.ledger().set_sequence_number(201);
     s.client
         .bulk_expire_payments(&s.admin, &vec![&s.env, pid0, pid1]);
 
@@ -4605,22 +4518,38 @@ fn test_authorization_events_emitted() {
     let merchant = Address::generate(&s.env);
     s.token_admin_client.mint(&customer, &1000);
 
-    let pid = s.client.create_payment(
-        &customer,
-        &merchant,
-        &300,
-        &s.token_addr,
-        &None,
-        &None,
-        &None,
-    );
-    s.env.ledger().set_timestamp(1000);
-    s.client.authorize_payment(&merchant, &pid, &3600u64);
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
+    s.env.ledger().set_sequence_number(150);
     s.client.capture_payment(&merchant, &pid);
 
     let events = s.env.events().all();
-    // Should have at least PaymentAuthorized, PaymentCaptured, PaymentCompleted, PaymentStatusChanged (x2)
-    assert!(events.len() >= 5);
+    // Should include PaymentAuthorized, PaymentCaptured, PaymentCompleted and PaymentStatusChanged.
+    assert!(events.len() >= 4);
+}
+
+#[test]
+fn test_void_authorization_returns_funds_to_customer() {
+    let s = setup();
+    s.init();
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    s.env.ledger().set_sequence_number(100);
+    let pid = s
+        .client
+        .authorize_payment(&merchant, &customer, &s.token_addr, &300, &200u64);
+
+    s.client.void_authorization(&customer, &pid);
+
+    let payment = s.client.get_payment(&pid);
+    assert_eq!(payment.status, PaymentStatus::Expired);
+    assert_eq!(s.token_client.balance(&customer), 1000);
+    assert_eq!(s.token_client.balance(&merchant), 0);
+    assert_eq!(s.token_client.balance(&s.client.address), 0);
 }
 
 // ===========================================================================
@@ -5949,4 +5878,153 @@ fn test_volume_cap_boundary_n_minus_1_pass_nth_rejected() {
         result.unwrap_err().unwrap(),
         Error::MerchantVolumeCapped.into()
     );
+}
+
+// ===========================================================================
+//  #FEATURE — Payments Invoice Expiry Grace Period Extension by Merchant
+// ===========================================================================
+
+#[test]
+fn test_extend_payment_expiry_single() {
+    let s = setup();
+    s.init();
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let payment_id = s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    let initial_payment = s.client.get_payment(&payment_id);
+    assert_eq!(initial_payment.extension_count, 0);
+
+    s.client.extend_payment_expiry(&merchant, &payment_id, &100);
+
+    let updated_payment = s.client.get_payment(&payment_id);
+    assert_eq!(updated_payment.extension_count, 1);
+    assert_eq!(updated_payment.expires_at, initial_payment.expires_at + 100 * 5); // 5 seconds per ledger
+}
+
+#[test]
+fn test_extend_payment_expiry_max_extensions() {
+    let s = setup();
+    s.init();
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let payment_id = s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Extend 3 times (default max)
+    s.client.extend_payment_expiry(&merchant, &payment_id, &100);
+    s.client.extend_payment_expiry(&merchant, &payment_id, &100);
+    s.client.extend_payment_expiry(&merchant, &payment_id, &100);
+
+    // 4th extension should fail
+    let result = s.client.try_extend_payment_expiry(&merchant, &payment_id, &100);
+    assert_eq!(result.unwrap_err().unwrap(), Error::MaxExtensionsReached.into());
+}
+
+#[test]
+fn test_extend_payment_expiry_invalid_status() {
+    let s = setup();
+    s.init();
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let payment_id = s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Complete payment first
+    s.client.complete_payment(&payment_id);
+
+    // Try to extend completed payment
+    let result = s.client.try_extend_payment_expiry(&merchant, &payment_id, &100);
+    assert_eq!(result.unwrap_err().unwrap(), Error::InvalidPaymentStatus.into());
+}
+
+#[test]
+fn test_admin_configure_extension_settings() {
+    let s = setup();
+    s.init();
+
+    // Check defaults
+    let (max_ledgers, max_extensions) = s.client.get_extension_config();
+    assert_eq!(max_ledgers, DEFAULT_MAX_EXTENSION_LEDGERS);
+    assert_eq!(max_extensions, DEFAULT_MAX_EXTENSIONS);
+
+    // Update config
+    s.client.update_extension_config(&s.admin, &5000, &5);
+    let (new_max_ledgers, new_max_extensions) = s.client.get_extension_config();
+    assert_eq!(new_max_ledgers, 5000);
+    assert_eq!(new_max_extensions, 5);
+}
+
+#[test]
+fn test_extend_payment_expiry_max_ledgers_exceeded() {
+    let s = setup();
+    s.init();
+
+    let customer = Address::generate(&s.env);
+    let merchant = Address::generate(&s.env);
+    s.token_admin_client.mint(&customer, &1000);
+
+    let payment_id = s.client.create_payment(
+        &customer,
+        &merchant,
+        &100,
+        &s.token_addr,
+        &None,
+        &None,
+        &None,
+    );
+
+    // Try to extend with more than default max ledgers
+    let result = s.client.try_extend_payment_expiry(&merchant, &payment_id, &(DEFAULT_MAX_EXTENSION_LEDGERS + 1));
+    assert_eq!(result.unwrap_err().unwrap(), Error::MaxExtensionLedgersExceeded.into());
+}
+
+#[test]
+fn test_withdrawal_default_limits_apply_to_new_merchant() {
+    let s = setup();
+    s.init();
+
+    let merchant = Address::generate(&s.env);
+
+    // Initial check: fallback to defaults automatically without having to set
+    let (window, cap) = s.client.get_withdrawal_rate_limit(&merchant);
+    assert_eq!(window, 86400);
+    assert_eq!(cap, i128::MAX);
+
+    // If admin updates defaults, new merchant should receive new bounds
+    s.client.set_default_withdrawal_limits(&s.admin, &3600, &1000);
+    let (new_window, new_cap) = s.client.get_withdrawal_rate_limit(&merchant);
+    assert_eq!(new_window, 3600);
+    assert_eq!(new_cap, 1000);
 }

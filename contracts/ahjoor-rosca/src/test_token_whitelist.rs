@@ -43,6 +43,13 @@ fn create_basic_config() -> RoscaConfig {
         skip_fee: 0i128,
         max_skips_per_cycle: 1u32,
         voting_mode: VotingMode::Equal,
+    late_fee_bps: 0,
+    grace_period_seconds: 0,
+    auction_enabled: false,
+    auction_window_ledgers: 0,
+    randomize_payout_order: false,
+    reserve_enabled: false,
+    reserve_contribution_bps: 0,
     }
 }
 

@@ -7141,15 +7141,13 @@ impl AhjoorContract {
         proposal_id
     }
 
-    /// Admin accepts a merge proposal and executes the merge.
-    /// `new_members` is the list of Group B's members to append to this group's payout order.
-    /// `group_b_balance` is the amount of tokens transferred from Group B (caller must have
-    /// already transferred the tokens to this contract before calling).
+    /// Group B admin signals consent to the merge by setting `accepted = true` on the proposal.
+    /// This is the consent-only step; it does NOT copy members or set GroupStatus.
+    /// Call `complete_merge` afterwards to execute the merge.
     pub fn accept_merge(
         env: Env,
         admin: Address,
         merge_proposal_id: u32,
-        new_members: Vec<Address>,
     ) {
         internals::check_not_paused(&env);
         admin.require_auth();
@@ -7171,6 +7169,63 @@ impl AhjoorContract {
 
         if proposal.accepted {
             panic!("Merge proposal already accepted");
+        }
+
+        proposal.accepted = true;
+        proposals.set(merge_proposal_id, proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey2::MergeProposals, &proposals);
+
+        events::emit_merge_accepted(&env, merge_proposal_id);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Executes the merge after Group B admin has accepted (accepted == true).
+    /// Copies `new_members` into this group's member/payout lists, sets GroupStatus::Merged
+    /// on the source group to prevent re-execution, and emits merge-completed events.
+    /// Errors with MigrationNotApproved (108) if proposal.accepted is false.
+    /// Errors with "Group already merged" if GroupStatus is already Merged.
+    pub fn complete_merge(
+        env: Env,
+        admin: Address,
+        merge_proposal_id: u32,
+        new_members: Vec<Address>,
+    ) {
+        internals::check_not_paused(&env);
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Admin not set");
+        if admin != stored_admin {
+            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
+        }
+
+        // Guard: source group must not already be merged
+        let group_status: GroupStatus = env
+            .storage()
+            .instance()
+            .get(&DataKey2::GroupStatus)
+            .unwrap_or(GroupStatus::Active);
+        if group_status == GroupStatus::Merged {
+            panic!("Group already merged");
+        }
+
+        let mut proposals: Map<u32, MergeProposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::MergeProposals)
+            .unwrap_or(Map::new(&env));
+        let proposal = proposals.get(merge_proposal_id).expect("Merge proposal not found");
+
+        // Guard: Group B admin must have accepted the proposal first
+        if !proposal.accepted {
+            panic_with_error!(&env, ExtError2::MigrationNotApproved);
         }
 
         // Merges are only permitted between rounds
@@ -7206,7 +7261,6 @@ impl AhjoorContract {
             .get(&DataKey::PayoutOrder)
             .expect("Not initialized");
 
-        // Append Group B's members after Group A's remaining members
         for m in new_members.iter() {
             if !members.contains(&m) {
                 members.push_back(m.clone());
@@ -7217,18 +7271,20 @@ impl AhjoorContract {
         env.storage().instance().set(&DataKey::Members, &members);
         env.storage().instance().set(&DataKey::PayoutOrder, &payout_order);
 
-        // Mark Group B as merged
+        // Permanently mark the source group as merged — prevents re-execution
+        env.storage()
+            .instance()
+            .set(&DataKey2::GroupStatus, &GroupStatus::Merged);
         env.storage()
             .instance()
             .set(&DataKey2::GroupMergedInto, &proposal.group_b_id);
 
-        proposal.accepted = true;
-        proposals.set(merge_proposal_id, proposal.clone());
+        // Remove proposal so it cannot be replayed
+        proposals.remove(merge_proposal_id);
         env.storage()
             .instance()
             .set(&DataKey2::MergeProposals, &proposals);
 
-        events::emit_merge_accepted(&env, merge_proposal_id);
         events::emit_merge_completed(&env, merge_proposal_id, new_members.len() as u32);
         events::emit_group_marked_merged(&env, proposal.group_b_id);
 
@@ -7245,6 +7301,14 @@ impl AhjoorContract {
             .get(&DataKey2::MergeProposals)
             .unwrap_or(Map::new(&env));
         proposals.get(proposal_id).expect("Merge proposal not found")
+    }
+
+    /// Returns the current GroupStatus for this group.
+    pub fn get_group_status(env: Env) -> GroupStatus {
+        env.storage()
+            .instance()
+            .get(&DataKey2::GroupStatus)
+            .unwrap_or(GroupStatus::Active)
     }
 
     // ── #236: Group Activity Freeze ────────────────────────────────────────────

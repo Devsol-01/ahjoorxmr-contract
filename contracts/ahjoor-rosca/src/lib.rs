@@ -2357,7 +2357,7 @@ impl AhjoorContract {
             panic!("Reveal phase has not opened yet");
         }
         if now > state.reveal_until {
-            panic!("Reveal phase has closed");
+            panic_with_error!(&env, ExtError2::AuctionWindowClosed);
         }
 
         let round = state.round;
@@ -2451,7 +2451,7 @@ impl AhjoorContract {
             panic!("No open sealed auction to settle");
         }
         if env.ledger().timestamp() <= state.reveal_until {
-            panic!("Reveal phase is still open");
+            panic_with_error!(&env, ExtError2::AuctionWindowClosed);
         }
 
         let round = state.round;

@@ -1498,6 +1498,9 @@ pub fn emit_partial_release_rejected(
     .publish(e);
 }
 
+// --- Issue #420: Seller Veto Cooldown ---
+
+/// Event: Seller raised a veto to block fund release.
 // ── #319: Bounty Board Events ─────────────────────────────────────────────────
 
 /// Event: Bounty created with open competitive work assignment
@@ -1688,6 +1691,10 @@ pub fn emit_scheduled_release_executed(
 pub struct SellerVetoRaised {
     pub escrow_id: u32,
     pub seller: Address,
+    pub raised_at: u64,
+}
+
+/// Event: Admin overrode an active seller veto, resetting the cooldown.
     pub veto_timestamp: u64,
 }
 
@@ -1705,6 +1712,14 @@ pub struct SellerVetoCancelled {
 pub struct VetoOverridden {
     pub escrow_id: u32,
     pub admin: Address,
+    pub overridden_at: u64,
+}
+
+pub fn emit_seller_veto_raised(e: &Env, escrow_id: u32, seller: Address, raised_at: u64) {
+    SellerVetoRaised {
+        escrow_id,
+        seller,
+        raised_at,
     pub reason_hash: BytesN<32>,
     pub elapsed_seconds: u64,
 }
@@ -1818,6 +1833,11 @@ pub fn emit_milestone_verified(
     .publish(e);
 }
 
+pub fn emit_veto_overridden(e: &Env, escrow_id: u32, admin: Address, overridden_at: u64) {
+    VetoOverridden {
+        escrow_id,
+        admin,
+        overridden_at,
 pub fn emit_bounty_milestone_verifier_replaced(
     e: &Env,
     escrow_id: u32,

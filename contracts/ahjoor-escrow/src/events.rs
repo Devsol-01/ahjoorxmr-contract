@@ -1397,3 +1397,41 @@ pub fn emit_partial_release_rejected(
     }
     .publish(e);
 }
+
+// --- Issue #420: Seller Veto Cooldown ---
+
+/// Event: Seller raised a veto to block fund release.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SellerVetoRaised {
+    pub escrow_id: u32,
+    pub seller: Address,
+    pub raised_at: u64,
+}
+
+/// Event: Admin overrode an active seller veto, resetting the cooldown.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct VetoOverridden {
+    pub escrow_id: u32,
+    pub admin: Address,
+    pub overridden_at: u64,
+}
+
+pub fn emit_seller_veto_raised(e: &Env, escrow_id: u32, seller: Address, raised_at: u64) {
+    SellerVetoRaised {
+        escrow_id,
+        seller,
+        raised_at,
+    }
+    .publish(e);
+}
+
+pub fn emit_veto_overridden(e: &Env, escrow_id: u32, admin: Address, overridden_at: u64) {
+    VetoOverridden {
+        escrow_id,
+        admin,
+        overridden_at,
+    }
+    .publish(e);
+}

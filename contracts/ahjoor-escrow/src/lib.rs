@@ -387,12 +387,12 @@ pub enum DataKey2 {
     BuyerWaiverSigned(u32),
     /// #318: seller waiver signature for conditional release
     SellerWaiverSigned(u32),
-/// Overflow storage keys for escrow — DataKey is capped at 52 variants.
-#[derive(Clone)]
-#[contracttype]
-pub enum DataKey2 {
     /// #332: BPS-based milestone states for proportional progressive release
     EscrowMilestonesV2(u32),
+    /// #420: last timestamp at which the seller raised a veto for this escrow
+    SellerVetoLastTimestamp(u32),
+    /// #420: admin-configurable veto cooldown in seconds (default: 7 days)
+    VetoCooldownSeconds,
 }
 
 // ── #332: Milestone BPS Progressive Release ───────────────────────────────────
@@ -432,6 +432,8 @@ const MAX_ARBITER_FEE_BPS: u32 = 1_000; // 10%
 const DEFAULT_RESOLUTION_COOLING_OFF_SECONDS: u64 = 24 * 60 * 60; // 24 hours
 const DEFAULT_SELLER_TRANSFER_VETO_WINDOW: u32 = 100; // ledgers
 const DEFAULT_AMENDMENT_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60; // 7 days
+/// #420: Default veto cooldown — 7 days in seconds.
+const DEFAULT_VETO_COOLDOWN_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// Auto-renewal configuration for recurring service agreements.
 /// When provided at escrow creation, the escrow will automatically re-fund
@@ -1180,6 +1182,23 @@ impl AhjoorEscrowContract {
 
         if caller != escrow.buyer && caller != escrow.arbiter {
             panic!("Only buyer or arbiter can release escrow");
+        }
+
+        // #420: Block release if an active seller veto is present.
+        // A veto is cleared only when admin calls override_seller_veto.
+        let veto_ts_opt: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::SellerVetoLastTimestamp(escrow_id));
+        if let Some(veto_ts) = veto_ts_opt {
+            let cooldown: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey2::VetoCooldownSeconds)
+                .unwrap_or(DEFAULT_VETO_COOLDOWN_SECONDS);
+            if env.ledger().timestamp() < veto_ts + cooldown {
+                panic!("SellerVetoActive: admin must override_seller_veto before release");
+            }
         }
 
         Self::require_unlocked(&env, &escrow);
@@ -5455,6 +5474,113 @@ impl AhjoorEscrowContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #420: Seller raises a veto to block an imminent fund release.
+    /// A veto is only permitted if the cooldown window since the last veto has elapsed.
+    /// Emits `SellerVetoRaised`.
+    pub fn raise_seller_veto(env: Env, seller: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        seller.require_auth();
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+
+        if escrow.seller != seller {
+            panic!("Only the escrow seller can raise a veto");
+        }
+        if !Self::is_open_escrow_status(escrow.status) {
+            panic!("Escrow is not active");
+        }
+
+        // Enforce cooldown: reject if a prior veto was raised within the window.
+        let cooldown: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::VetoCooldownSeconds)
+            .unwrap_or(DEFAULT_VETO_COOLDOWN_SECONDS);
+
+        if let Some(last_ts) = env
+            .storage()
+            .persistent()
+            .get::<DataKey2, u64>(&DataKey2::SellerVetoLastTimestamp(escrow_id))
+        {
+            if env.ledger().timestamp() < last_ts + cooldown {
+                panic!("VetoCooldownActive: seller must wait for cooldown before raising another veto");
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey2::SellerVetoLastTimestamp(escrow_id), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::SellerVetoLastTimestamp(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_seller_veto_raised(&env, escrow_id, seller, now);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #420: Admin overrides an active seller veto, allowing fund release to proceed.
+    /// Resets the cooldown timer so the seller cannot immediately re-veto.
+    /// Emits `VetoOverridden`.
+    pub fn admin_override_veto(env: Env, admin: Address, escrow_id: u32) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("Escrow not found");
+        if !Self::is_open_escrow_status(escrow.status) {
+            panic!("Escrow is not active");
+        }
+
+        // Overriding resets the timestamp to now, starting a fresh cooldown window.
+        // This prevents the seller from immediately raising a new veto after the override.
+        let now = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey2::SellerVetoLastTimestamp(escrow_id), &now);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::SellerVetoLastTimestamp(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_veto_overridden(&env, escrow_id, admin, now);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #420: Admin sets the global veto cooldown window in seconds (default 7 days).
+    /// Setting to 0 effectively disables the cooldown (not recommended).
+    pub fn set_veto_cooldown_seconds(env: Env, admin: Address, seconds: u64) {
+        Self::require_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey2::VetoCooldownSeconds, &seconds);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #420: Returns the current veto cooldown window in seconds.
+    pub fn get_veto_cooldown_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey2::VetoCooldownSeconds)
+            .unwrap_or(DEFAULT_VETO_COOLDOWN_SECONDS)
     }
 
     /// Buyer explicitly approves the seller transfer, finalising it immediately.

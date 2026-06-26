@@ -341,6 +341,11 @@ impl AhjoorContract {
         env.storage()
             .instance()
             .set(&DataKey::QuorumPercentage, &51u32);
+        let mut quorum_config = Map::<ProposalType, u32>::new(&env);
+        quorum_config.set(ProposalType::MemberFreeze, 6_700);
+        env.storage()
+            .instance()
+            .set(&DataKey2::QuorumConfig, &quorum_config);
 
         // Guard: reject if contribution_amount × max_members would overflow i128.
         if contribution_amount.checked_mul(max_members as i128).is_none() {
@@ -4011,6 +4016,106 @@ impl AhjoorContract {
 
     // --- GOVERNANCE FUNCTIONS ---
 
+    /// Member-initiated emergency freeze proposal.
+    /// Uses per-type quorum config for `ProposalType::MemberFreeze` (default: 67%).
+    pub fn propose_member_freeze(env: Env, member: Address, reason_hash: BytesN<32>) {
+        internals::check_not_paused(&env);
+        member.require_auth();
+
+        let members: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Members)
+            .expect("Not initialized");
+        if !members.contains(&member) {
+            panic_with_error!(&env, Error::OnlyMembersAllowed);
+        }
+
+        let is_frozen: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey3::IsFrozen)
+            .unwrap_or(false);
+        if is_frozen {
+            panic_with_error!(&env, ExtError::GroupFrozen);
+        }
+
+        let mut proposal_counter: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalCounter)
+            .unwrap_or(0);
+        let proposal_id = proposal_counter;
+        proposal_counter += 1;
+
+        let quorum_config: Map<ProposalType, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::QuorumConfig)
+            .unwrap_or(Map::new(&env));
+        let required_quorum = quorum_config.get(ProposalType::MemberFreeze).unwrap_or(6_700);
+
+        let current_time = env.ledger().timestamp();
+        let deadline = current_time + 86_400; // 24h default vote window
+        let proposal = Proposal {
+            id: proposal_id,
+            proposal_type: ProposalType::MemberFreeze,
+            creator: member.clone(),
+            description: String::from_str(&env, "Member emergency freeze"),
+            target_member: member.clone(),
+            votes_for: 0,
+            votes_against: 0,
+            created_at: current_time,
+            deadline,
+            status: ProposalStatus::Pending,
+            execution_data: None,
+            required_quorum,
+        };
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+
+        let mut proposal_votes: Map<u32, Map<Address, bool>> = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalVotes)
+            .unwrap_or(Map::new(&env));
+        proposal_votes.set(proposal_id, Map::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalVotes, &proposal_votes);
+        env.storage()
+            .instance()
+            .set(&DataKey::ProposalCounter, &proposal_counter);
+
+        let mut reasons: Map<u32, BytesN<32>> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::MemberFreezeReasons)
+            .unwrap_or(Map::new(&env));
+        reasons.set(proposal_id, reason_hash);
+        env.storage()
+            .instance()
+            .set(&DataKey3::MemberFreezeReasons, &reasons);
+
+        events::emit_prop_new(
+            &env,
+            proposal_id,
+            member.clone(),
+            member,
+            current_time,
+            deadline,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     pub fn create_proposal(
         env: Env,
         creator: Address,
@@ -4474,6 +4579,43 @@ impl AhjoorContract {
                 am.remove(target.clone());
                 env.storage().instance().set(&DataKey2::ActiveReinstatementProposal, &am);
                 events::emit_reinstatement_approved(&env, target);
+            }
+            ProposalType::MemberFreeze => {
+                let mut reasons: Map<u32, BytesN<32>> = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey3::MemberFreezeReasons)
+                    .unwrap_or(Map::new(&env));
+                let reason_hash = reasons
+                    .get(proposal_id)
+                    .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+                reasons.remove(proposal_id);
+                env.storage()
+                    .instance()
+                    .set(&DataKey3::MemberFreezeReasons, &reasons);
+
+                env.storage().instance().set(&DataKey3::IsFrozen, &true);
+
+                let mut log: Vec<FreezeRecord> = env
+                    .storage()
+                    .persistent()
+                    .get(&PersistentKey::FreezeLog)
+                    .unwrap_or(Vec::new(&env));
+                log.push_back(FreezeRecord {
+                    frozen_at_ledger: env.ledger().sequence(),
+                    frozen_by: proposal.creator.clone(),
+                    reason_hash: reason_hash.clone(),
+                    unfrozen_at_ledger: None,
+                    resolution_hash: None,
+                });
+                env.storage().persistent().set(&PersistentKey::FreezeLog, &log);
+                env.storage().persistent().extend_ttl(
+                    &PersistentKey::FreezeLog,
+                    PERSISTENT_LIFETIME_THRESHOLD,
+                    PERSISTENT_BUMP_AMOUNT,
+                );
+
+                events::emit_group_frozen(&env, 0, reason_hash, env.ledger().sequence());
             }
         }
 

@@ -253,6 +253,16 @@ pub struct SubscriptionTrialEnded {
     pub subscription_id: u32,
 }
 
+/// Event: Subscription plan changed with prorated credit applied to next charge
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct SubscriptionPlanChanged {
+    pub subscription_id: u32,
+    pub old_plan: u32,
+    pub new_plan: u32,
+    pub prorated_credit: i128,
+}
+
 /// Event: Merchant settlement batch processed.
 #[contractevent]
 #[derive(Clone, Debug)]
@@ -610,6 +620,22 @@ pub fn emit_subscription_trial_started(e: &Env, subscription_id: u32, trial_ends
 
 pub fn emit_subscription_trial_ended(e: &Env, subscription_id: u32) {
     SubscriptionTrialEnded { subscription_id }.publish(e);
+}
+
+pub fn emit_subscription_plan_changed(
+    e: &Env,
+    subscription_id: u32,
+    old_plan: u32,
+    new_plan: u32,
+    prorated_credit: i128,
+) {
+    SubscriptionPlanChanged {
+        subscription_id,
+        old_plan,
+        new_plan,
+        prorated_credit,
+    }
+    .publish(e);
 }
 
 pub fn emit_batch_settlement_processed(

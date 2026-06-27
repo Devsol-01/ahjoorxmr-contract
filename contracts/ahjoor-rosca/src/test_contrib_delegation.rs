@@ -78,7 +78,7 @@ fn test_delegate_and_get_delegation() {
 
     let rec = client.get_member_delegation(&0u32, &member).unwrap();
     assert_eq!(rec.proxy, proxy);
-    assert_eq!(rec.expiry_ledger, expiry);
+    assert_eq!(rec.expiry, expiry);
 }
 
 #[test]

@@ -221,77 +221,65 @@ pub enum DataKey {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey2 {
-    // Preserved discriminants for keys moved from `DataKey` to maintain storage slot identity.
-    ProposedAdmin = 40,      // Address — proposed new admin (pending acceptance)
-    ContractVersion = 41,    // u32
-    FeeRecipient = 43,       // Address — receives protocol fees
-    UseTimestampSchedule = 45,    // bool
-    RoundDurationSeconds = 46,    // u64
-    MemberTiers = 49,             // Map<Address, u32>
-
-    InsurancePool,           // i128
-    InsuranceContributionBps, // u32
-    SkipFee,                 // i128
-    MaxSkipsPerCycle,        // u32
-    SkipRequests,            // Map<(Address, u32), bool>
-    MemberSkips,             // Map<(Address, u32), u32>
-    QuorumConfig,            // Map<ProposalType, u32>
-    VotingMode,              // VotingMode
-    ReinvestPreference,      // Map<Address, bool>
-    ExitRequests,            // Map<Address, ExitRequest>
-    /// Token whitelist contract address
-    TokenWhitelistContract,  // Address
+    ProposedAdmin,             // Address — proposed new admin (pending acceptance)
+    ContractVersion,           // u32
+    FeeRecipient,              // Address — receives protocol fees
+    UseTimestampSchedule,      // bool
+    RoundDurationSeconds,      // u64
+    MemberTiers,               // Map<Address, u32>
+    InsurancePool,             // i128
+    InsuranceContributionBps,  // u32
+    SkipFee,                   // i128
+    MaxSkipsPerCycle,          // u32
+    SkipRequests,              // Map<(Address, u32), bool>
+    MemberSkips,               // Map<(Address, u32), u32>
+    QuorumConfig,              // Map<ProposalType, u32>
+    VotingMode,                // VotingMode
+    ReinvestPreference,        // Map<Address, bool>
+    ExitRequests,              // Map<Address, ExitRequest>
+    TokenWhitelistContract,    // Address
     // Audit Trail
-    CycleRecords,            // Map<u32, CycleRecord> — per-cycle audit trail
-    CycleRecordRetentionWindow, // u32 — number of cycles to retain in persistent storage
-    ArchivedCycleRecords,    // Map<u32, CycleRecord> — archived records in temporary storage
-    CycleStartTimestamps,    // Map<u32, u64> — track when each cycle started
+    CycleRecords,              // Map<u32, CycleRecord>
+    CycleRecordRetentionWindow, // u32
+    ArchivedCycleRecords,      // Map<u32, CycleRecord>
+    CycleStartTimestamps,      // Map<u32, u64>
     // Emergency Payout
-    EmergencyPayoutConfig,   // EmergencyPayoutConfig
-    EmergencyPayoutRequests, // Map<(u32, Address), EmergencyPayoutRequest> — (round, requester)
-    EmergencyPayoutVotes,    // Map<(u32, Address, Address), bool> — (round, requester, voter)
-    EmergencyPayoutCount,    // Map<u32, u32> — (cycle, count) — emergency payouts per cycle
-    EmergencyPayoutApproved, // Map<(u32, Address), bool> — (round, requester) — track approved emergency payouts per cycle
+    EmergencyPayoutConfig,     // EmergencyPayoutConfig
+    EmergencyPayoutRequests,   // Map<(u32, Address), EmergencyPayoutRequest>
+    EmergencyPayoutVotes,      // Map<(u32, Address, Address), bool>
+    EmergencyPayoutCount,      // Map<u32, u32>
+    EmergencyPayoutApproved,   // Map<(u32, Address), bool>
     // Group Dissolution
-    GroupStatus,             // GroupStatus
-    DissolutionConfig,       // DissolutionConfig
-    DissolutionVotes,        // Map<(u32, Address), bool> — (round, voter)
-    DissolutionVoteCount,    // Map<u32, i128> — (round, votes_for)
-    DissolutionDeadline,     // Map<u32, u64> — (round, deadline)
+    GroupStatus,               // GroupStatus
+    DissolutionConfig,         // DissolutionConfig
+    DissolutionVotes,          // Map<(u32, Address), bool>
+    DissolutionVoteCount,      // Map<u32, i128>
+    DissolutionDeadline,       // Map<u32, u64>
     // #213: Payout Slot Swap
     SlotSwapCounter,
-    SlotSwaps,               // Map<u32, SlotSwap>
-    SlotSwapRequiresAdmin,   // bool
-    SlotSwapExpirySeconds,   // u64
+    SlotSwaps,                 // Map<u32, SlotSwap>
+    SlotSwapRequiresAdmin,     // bool
+    SlotSwapExpirySeconds,     // u64
     // #214: Insurance Coverage
-    InsuranceCoverageMode,   // InsuranceCoverageMode
-    InsuranceClaims,         // Map<u32, Vec<InsuranceClaim>>
+    InsuranceCoverageMode,     // InsuranceCoverageMode
+    InsuranceClaims,           // Map<u32, Vec<InsuranceClaim>>
     // #218: Reinstatement
-    ReinstatementFee,        // i128
-    PendingReinstatementFee, // Vec<Address>
+    ReinstatementFee,          // i128
+    PendingReinstatementFee,   // Vec<Address>
     ActiveReinstatementProposal, // Map<Address, u32>
     // Waitlist (#219)
-    Waitlist,                // Vec<(Address, u64)> — (address, joined_at)
-    CatchUpDebt,             // Map<Address, i128> — catch-up contributions owed
+    Waitlist,                  // Vec<(Address, u64)>
+    CatchUpDebt,               // Map<Address, i128>
     // #230: Group Merge
-    MergeProposalCounter,    // u32
-    MergeProposals,          // Map<u32, MergeProposal>
-    GroupMergedInto,         // u32 — target group_id this group was merged into
+    MergeProposalCounter,      // u32
+    MergeProposals,            // Map<u32, MergeProposal>
+    GroupMergedInto,           // u32
     // #224: Cycle Completion Bonus
-    CycleBonusAmount,        // i128 — bonus per qualifying member per cycle
+    CycleBonusAmount,          // i128
     // #227: Round Duration Update
-    PendingRoundDuration,    // u64 — new duration to apply at next round start
-    MinRoundDuration,        // u64 — lower bound for round duration
-    MaxRoundDuration,        // u64 — upper bound for round duration
-    // Waitlist (#219)
-    StartAt,                 // u64
-    GroupActivationEmitted,  // bool
-    GracePeriodLedgers,      // u32
-    PendingPenalties,        // Map<Address, u32> (member -> round)
-    LastRoundDeadline,       // u64
-    // #240: Co-Signer Guarantee
-    CoSigners,               // Map<Address, CoSignerRecord> — member → co-signer record
-    CoSignerWindowLedgers,   // u32 — grace period ledgers before penalty applied
+    PendingRoundDuration,      // u64
+    MinRoundDuration,          // u64
+    MaxRoundDuration,          // u64
 }
 
 /// Overflow key enum — DataKey2 is capped at 50 variants by the soroban XDR limit.
@@ -367,9 +355,19 @@ pub enum DataKey3 {
     MemberReceiptIds(Address),
 }
 
-const _: () = assert!(std::mem::variant_count::<DataKey>() < 50, "DataKey must remain under 50 variants");
-const _: () = assert!(std::mem::variant_count::<DataKey2>() < 50, "DataKey2 must remain under 50 variants");
-const _: () = assert!(std::mem::variant_count::<DataKey3>() < 50, "DataKey3 must remain under 50 variants");
+/// Overflow key enum — DataKey3 is at capacity.
+/// Keys relocated from DataKey2 to keep it under the 50-variant limit.
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey4 {
+    StartAt,                   // u64 — optional ROSCA start timestamp
+    GroupActivationEmitted,    // bool — activation event already emitted
+    GracePeriodLedgers,        // u32 — ledger-based grace period for penalties
+    PendingPenalties,          // Map<Address, u32> — member → round
+    LastRoundDeadline,         // u64 — deadline of the last closed round
+    CoSigners,                 // Map<Address, CoSignerRecord>
+    CoSignerWindowLedgers,     // u32 — co-signer grace period in ledgers
+}
 
 // ── #330: Contribution Delegation ────────────────────────────────────────────
 

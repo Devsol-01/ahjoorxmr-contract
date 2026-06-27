@@ -37,8 +37,8 @@ mod test_token_whitelist;
 mod test_slot_auction;
 mod test_sealed_slot_auction;
 mod test_migration;
-mod test_co_payer_split;
-mod test_contribution_receipts;
+// mod test_co_payer_split;        // source file not yet committed
+// mod test_contribution_receipts; // source file not yet committed
 mod migration_client;
 pub use migration_client::RoscaMigrationClient;
 
@@ -159,13 +159,13 @@ impl AhjoorContract {
             .set(&DataKey::RoundDeadline, &deadline);
         env.storage()
             .instance()
-            .set(&DataKey2::LastRoundDeadline, &deadline);
+            .set(&DataKey4::LastRoundDeadline, &deadline);
         env.storage()
             .instance()
-            .set(&DataKey2::StartAt, &resolved_start_at);
+            .set(&DataKey4::StartAt, &resolved_start_at);
         env.storage()
             .instance()
-            .set(&DataKey2::GroupActivationEmitted, &false);
+            .set(&DataKey4::GroupActivationEmitted, &false);
         env.storage()
             .instance()
             .set(&DataKey::Defaulters, &Vec::<Address>::new(&env));
@@ -253,13 +253,13 @@ impl AhjoorContract {
         events::emit_suspension_threshold_set(&env, config.max_defaults);
         env.storage()
             .instance()
-            .set(&DataKey2::GracePeriodLedgers, &config.grace_period_ledgers);
+            .set(&DataKey4::GracePeriodLedgers, &config.grace_period_ledgers);
         env.storage()
             .instance()
             .set(&DataKey3::GracePeriodSeconds, &config.grace_period_seconds);
         env.storage()
             .instance()
-            .set(&DataKey2::PendingPenalties, &Map::<Address, u32>::new(&env));
+            .set(&DataKey4::PendingPenalties, &Map::<Address, u32>::new(&env));
 
         env.storage()
             .instance()
@@ -444,7 +444,7 @@ impl AhjoorContract {
     pub fn get_start_time(env: Env) -> u64 {
         env.storage()
             .instance()
-            .get(&DataKey2::StartAt)
+            .get(&DataKey4::StartAt)
             .unwrap_or(env.ledger().timestamp())
     }
 
@@ -713,7 +713,7 @@ impl AhjoorContract {
         if let Some(version) = env
             .storage()
             .instance()
-            .get::<DataKey, u32>(&DataKey2::ContractVersion)
+            .get::<DataKey2, u32>(&DataKey2::ContractVersion)
         {
             version
         } else {
@@ -819,7 +819,7 @@ impl AhjoorContract {
         let activation_emitted: bool = env
             .storage()
             .instance()
-            .get(&DataKey2::GroupActivationEmitted)
+            .get(&DataKey4::GroupActivationEmitted)
             .unwrap_or(false);
 
         let mut paid_members: Vec<Address> = env
@@ -1123,7 +1123,7 @@ impl AhjoorContract {
             events::emit_group_activated(&env, start_at);
             env.storage()
                 .instance()
-                .set(&DataKey2::GroupActivationEmitted, &true);
+                .set(&DataKey4::GroupActivationEmitted, &true);
         }
 
         env.storage()
@@ -1322,7 +1322,7 @@ impl AhjoorContract {
         events::emit_closed(&env, current_round, defaulters);
         env.storage()
             .instance()
-            .set(&DataKey2::LastRoundDeadline, &deadline);
+            .set(&DataKey4::LastRoundDeadline, &deadline);
 
         internals::reset_round_state(&env, current_round);
     }
@@ -1443,7 +1443,7 @@ impl AhjoorContract {
         events::emit_round_finalized(&env, current_round, defaulters.clone());
         env.storage()
             .instance()
-            .set(&DataKey2::LastRoundDeadline, &deadline);
+            .set(&DataKey4::LastRoundDeadline, &deadline);
 
         // Execute payout BEFORE applying new suspensions so the recipient selection
         // uses the pre-round suspension state (newly delinquent members don't affect
@@ -1461,12 +1461,12 @@ impl AhjoorContract {
         let co_signer_window: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSignerWindowLedgers)
+            .get(&DataKey4::CoSignerWindowLedgers)
             .unwrap_or(0);
         let co_signers: Map<Address, CoSignerRecord> = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSigners)
+            .get(&DataKey4::CoSigners)
             .unwrap_or(Map::new(&env));
         let mut window_starts: Map<Address, u32> = env
             .storage()
@@ -1778,35 +1778,6 @@ impl AhjoorContract {
         internals::check_not_frozen(&env);
         bidder.require_auth();
 
-    /// #390: Switch between ledger-based and timestamp-based scheduling.
-    /// Forbidden once the first round has started (CurrentRound > 0) to prevent
-    /// grace-window aliasing between the two scheduling modes.
-    pub fn set_use_timestamp_schedule(env: Env, admin: Address, value: bool) {
-        internals::check_not_paused(&env);
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("No admin");
-        if admin != stored_admin {
-            panic_with_error!(&env, ExtError::OnlyAdminAllowed);
-        }
-        let current_round: u32 = env.storage().instance().get(&DataKey::CurrentRound).unwrap_or(0);
-        if current_round > 0 {
-            panic_with_error!(&env, Error::CannotChangeMidRound);
-        }
-        env.storage().instance().set(&DataKey2::UseTimestampSchedule, &value);
-        env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-    }
-
-    /// Backward-compatible alias kept for existing test callers.
-    pub fn penalise_defaulter(env: Env, member: Address) {
-        Self::request_penalty_grace(env, member);
-    }
-
-    /// Member requests a grace-period deferral of their pending penalty.
-    /// Admin must approve; if within the grace window, the penalty is queued;
-    /// otherwise it is applied immediately.
-    pub fn request_penalty_grace(env: Env, member: Address) {
-        internals::check_not_paused(&env);
-        let admin: Address = env
         // Feature guard
         let auction_enabled: bool = env
             .storage()
@@ -1868,7 +1839,6 @@ impl AhjoorContract {
         let mut new_bids: Vec<SlotBid> = Vec::new(&env);
         for bid in bids.iter() {
             if bid.bidder == bidder {
-                // Refund the previous deposit
                 token_client.transfer(
                     &env.current_contract_address(),
                     &bidder,
@@ -1894,7 +1864,6 @@ impl AhjoorContract {
             .instance()
             .set(&DataKey3::AuctionBids, &new_bids);
 
-        // group_id = 0 (single-group contract)
         events::emit_slot_bid_placed(&env, 0, bidder, desired_slot, bid_amount);
 
         env.storage()
@@ -1916,7 +1885,7 @@ impl AhjoorContract {
         if current_round > 0 {
             panic_with_error!(&env, Error::CannotChangeMidRound);
         }
-        env.storage().instance().set(&DataKey::UseTimestampSchedule, &value);
+        env.storage().instance().set(&DataKey2::UseTimestampSchedule, &value);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
@@ -3333,13 +3302,13 @@ impl AhjoorContract {
         let round_deadline: u64 = env
             .storage()
             .instance()
-            .get(&DataKey2::LastRoundDeadline)
+            .get(&DataKey4::LastRoundDeadline)
             .or(env.storage().instance().get(&DataKey::RoundDeadline))
             .unwrap_or(0);
         let grace_period_ledgers: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::GracePeriodLedgers)
+            .get(&DataKey4::GracePeriodLedgers)
             .unwrap_or(0);
         let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
         let current_ledger = env.ledger().timestamp();
@@ -3348,12 +3317,12 @@ impl AhjoorContract {
             let mut pending_penalties: Map<Address, u32> = env
                 .storage()
                 .instance()
-                .get(&DataKey2::PendingPenalties)
+                .get(&DataKey4::PendingPenalties)
                 .unwrap_or(Map::new(&env));
             pending_penalties.set(member.clone(), current_round);
             env.storage()
                 .instance()
-                .set(&DataKey2::PendingPenalties, &pending_penalties);
+                .set(&DataKey4::PendingPenalties, &pending_penalties);
             events::emit_grace_period_warning(
                 &env,
                 member,
@@ -3381,7 +3350,7 @@ impl AhjoorContract {
         }
         env.storage()
             .instance()
-            .set(&DataKey2::CoSignerWindowLedgers, &window_ledgers);
+            .set(&DataKey4::CoSignerWindowLedgers, &window_ledgers);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -3426,13 +3395,13 @@ impl AhjoorContract {
         let round_deadline: u64 = env
             .storage()
             .instance()
-            .get(&DataKey2::LastRoundDeadline)
+            .get(&DataKey4::LastRoundDeadline)
             .or(env.storage().instance().get(&DataKey::RoundDeadline))
             .unwrap_or(0);
         let grace_period_ledgers: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::GracePeriodLedgers)
+            .get(&DataKey4::GracePeriodLedgers)
             .unwrap_or(0);
         let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
         let current_ledger = env.ledger().timestamp();
@@ -3440,12 +3409,12 @@ impl AhjoorContract {
             let mut pending_penalties: Map<Address, u32> = env
                 .storage()
                 .instance()
-                .get(&DataKey2::PendingPenalties)
+                .get(&DataKey4::PendingPenalties)
                 .unwrap_or(Map::new(&env));
             pending_penalties.set(member.clone(), current_round);
             env.storage()
                 .instance()
-                .set(&DataKey2::PendingPenalties, &pending_penalties);
+                .set(&DataKey4::PendingPenalties, &pending_penalties);
             events::emit_grace_period_warning(
                 &env,
                 member,
@@ -3458,12 +3427,12 @@ impl AhjoorContract {
         let mut pending_penalties: Map<Address, u32> = env
             .storage()
             .instance()
-            .get(&DataKey2::PendingPenalties)
+            .get(&DataKey4::PendingPenalties)
             .unwrap_or(Map::new(&env));
         pending_penalties.remove(member.clone());
         env.storage()
             .instance()
-            .set(&DataKey2::PendingPenalties, &pending_penalties);
+            .set(&DataKey4::PendingPenalties, &pending_penalties);
 
         Self::apply_penalty(&env, member, penalty_amount, current_round);
     }
@@ -3472,7 +3441,7 @@ impl AhjoorContract {
         let mut pending_penalties: Map<Address, u32> = env
             .storage()
             .instance()
-            .get(&DataKey2::PendingPenalties)
+            .get(&DataKey4::PendingPenalties)
             .unwrap_or(Map::new(env));
         if pending_penalties.len() == 0 {
             return;
@@ -3487,19 +3456,19 @@ impl AhjoorContract {
             pending_penalties = Map::new(env);
             env.storage()
                 .instance()
-                .set(&DataKey2::PendingPenalties, &pending_penalties);
+                .set(&DataKey4::PendingPenalties, &pending_penalties);
             return;
         }
 
         let grace_period_ledgers: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::GracePeriodLedgers)
+            .get(&DataKey4::GracePeriodLedgers)
             .unwrap_or(0);
         let round_deadline: u64 = env
             .storage()
             .instance()
-            .get(&DataKey2::LastRoundDeadline)
+            .get(&DataKey4::LastRoundDeadline)
             .or(env.storage().instance().get(&DataKey::RoundDeadline))
             .unwrap_or(0);
         let grace_expires_at = round_deadline.saturating_add(grace_period_ledgers as u64);
@@ -3521,7 +3490,7 @@ impl AhjoorContract {
 
         env.storage()
             .instance()
-            .set(&DataKey2::PendingPenalties, &still_pending);
+            .set(&DataKey4::PendingPenalties, &still_pending);
     }
 
     fn apply_penalty(env: &Env, member: Address, penalty_amount: i128, round: u32) {
@@ -4558,27 +4527,18 @@ impl AhjoorContract {
             ProposalType::MaxMembersUpdate => {
                 internals::execute_max_members_update(&env, proposal.execution_data);
             }
-            // #218: lift suspension, reset defaults, re-append to payout order
+            // #404: Reinstatement side-effects are executed by `reinstate_member`.
+            // Save the proposal as Approved and return; the suspended member must
+            // call reinstate_member to complete the process.
             ProposalType::Reinstatement => {
-                let target = proposal.target_member.clone();
-                let mut suspended: Vec<Address> = env.storage().instance().get(&DataKey::SuspendedMembers).unwrap_or(Vec::new(&env));
-                let mut ns: Vec<Address> = Vec::new(&env);
-                for m in suspended.iter() { if m != target { ns.push_back(m); } }
-                env.storage().instance().set(&DataKey::SuspendedMembers, &ns);
-                let mut dc: Map<Address, u32> = env.storage().instance().get(&DataKey::DefaultCount).unwrap_or(Map::new(&env));
-                dc.set(target.clone(), 0);
-                env.storage().instance().set(&DataKey::DefaultCount, &dc);
-                let mut po: Vec<Address> = env.storage().instance().get(&DataKey::PayoutOrder).unwrap_or(Vec::new(&env));
-                if !po.contains(&target) { po.push_back(target.clone()); env.storage().instance().set(&DataKey::PayoutOrder, &po); }
-                let fee: i128 = env.storage().instance().get(&DataKey2::ReinstatementFee).unwrap_or(0);
-                if fee > 0 {
-                    let mut pf: Vec<Address> = env.storage().instance().get(&DataKey2::PendingReinstatementFee).unwrap_or(Vec::new(&env));
-                    if !pf.contains(&target) { pf.push_back(target.clone()); env.storage().instance().set(&DataKey2::PendingReinstatementFee, &pf); }
-                }
-                let mut am: Map<Address, u32> = env.storage().instance().get(&DataKey2::ActiveReinstatementProposal).unwrap_or(Map::new(&env));
-                am.remove(target.clone());
-                env.storage().instance().set(&DataKey2::ActiveReinstatementProposal, &am);
-                events::emit_reinstatement_approved(&env, target);
+                proposals.set(proposal_id, proposal.clone());
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Proposals, &proposals);
+                env.storage()
+                    .instance()
+                    .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+                return;
             }
             ProposalType::MemberFreeze => {
                 let mut reasons: Map<u32, BytesN<32>> = env
@@ -5195,7 +5155,7 @@ impl AhjoorContract {
             if let Some(fee_recipient) = env
                 .storage()
                 .instance()
-                .get::<DataKey, Address>(&DataKey2::FeeRecipient)
+                .get::<DataKey2, Address>(&DataKey2::FeeRecipient)
             {
                 client.transfer(&env.current_contract_address(), &fee_recipient, &remaining);
             } else if let Some(first_member) = members.get(0) {
@@ -5316,7 +5276,7 @@ impl AhjoorContract {
         let use_timestamp = env
             .storage()
             .instance()
-            .get(&DataKey::UseTimestampSchedule)
+            .get(&DataKey2::UseTimestampSchedule)
             .unwrap_or(false);
 
         let expiry_mode = if use_timestamp {
@@ -7121,6 +7081,113 @@ impl AhjoorContract {
         proposal_id
     }
 
+    /// #404: Complete a reinstatement after the linked proposal has been Approved.
+    /// The suspended member calls this function; it verifies the proposal reached
+    /// Approved status before lifting the suspension. Returns
+    /// Error::ProposalNotPending if the proposal is not yet Approved.
+    pub fn reinstate_member(env: Env, member: Address) {
+        member.require_auth();
+        internals::check_not_paused(&env);
+
+        let am: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ActiveReinstatementProposal)
+            .unwrap_or(Map::new(&env));
+
+        let proposal_id = am
+            .get(member.clone())
+            .unwrap_or_else(|| panic_with_error!(&env, Error::ProposalNotFound));
+
+        let mut proposals: Map<u32, Proposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Proposals)
+            .unwrap_or(Map::new(&env));
+        let mut proposal = proposals
+            .get(proposal_id)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::ProposalNotFound));
+
+        if proposal.status != ProposalStatus::Approved {
+            panic_with_error!(&env, Error::ProposalNotPending);
+        }
+
+        // Lift suspension
+        let mut suspended: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuspendedMembers)
+            .unwrap_or(Vec::new(&env));
+        let mut ns: Vec<Address> = Vec::new(&env);
+        for m in suspended.iter() {
+            if m != member {
+                ns.push_back(m);
+            }
+        }
+        env.storage().instance().set(&DataKey::SuspendedMembers, &ns);
+
+        // Reset default count
+        let mut dc: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultCount)
+            .unwrap_or(Map::new(&env));
+        dc.set(member.clone(), 0u32);
+        env.storage().instance().set(&DataKey::DefaultCount, &dc);
+
+        // Re-append to payout order
+        let mut po: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::PayoutOrder)
+            .unwrap_or(Vec::new(&env));
+        if !po.contains(&member) {
+            po.push_back(member.clone());
+            env.storage().instance().set(&DataKey::PayoutOrder, &po);
+        }
+
+        // Queue reinstatement fee if configured
+        let fee: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ReinstatementFee)
+            .unwrap_or(0);
+        if fee > 0 {
+            let mut pf: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&DataKey2::PendingReinstatementFee)
+                .unwrap_or(Vec::new(&env));
+            if !pf.contains(&member) {
+                pf.push_back(member.clone());
+                env.storage()
+                    .instance()
+                    .set(&DataKey2::PendingReinstatementFee, &pf);
+            }
+        }
+
+        // Mark proposal Executed and clear the ActiveReinstatementProposal entry
+        proposal.status = ProposalStatus::Executed;
+        proposals.set(proposal_id, proposal);
+        env.storage().instance().set(&DataKey::Proposals, &proposals);
+
+        let mut am2: Map<Address, u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey2::ActiveReinstatementProposal)
+            .unwrap_or(Map::new(&env));
+        am2.remove(member.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey2::ActiveReinstatementProposal, &am2);
+
+        events::emit_reinstatement_approved(&env, member);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
     /// Get multisig configuration
     pub fn get_multisig_config(env: Env) -> (Vec<Address>, u32) {
         let co_admins: Vec<Address> = env
@@ -7750,7 +7817,7 @@ impl AhjoorContract {
         let mut co_signers: Map<Address, CoSignerRecord> = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSigners)
+            .get(&DataKey4::CoSigners)
             .unwrap_or(Map::new(&env));
         if co_signers.contains_key(member.clone()) {
             panic_with_error!(&env, ExtError::CoSignerAlreadySet);
@@ -7760,7 +7827,7 @@ impl AhjoorContract {
             co_signer: co_signer.clone(),
             status: CoSignerStatus::Pending,
         });
-        env.storage().instance().set(&DataKey2::CoSigners, &co_signers);
+        env.storage().instance().set(&DataKey4::CoSigners, &co_signers);
 
         events::emit_co_signer_set(&env, group_id, member, co_signer);
         env.storage().instance().extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -7820,7 +7887,7 @@ impl AhjoorContract {
         let mut co_signers: Map<Address, CoSignerRecord> = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSigners)
+            .get(&DataKey4::CoSigners)
             .unwrap_or(Map::new(&env));
         let mut record = co_signers.get(member.clone()).unwrap_or_else(|| {
             panic_with_error!(&env, ExtError::NoCoSignerFound)
@@ -7830,7 +7897,7 @@ impl AhjoorContract {
         }
         record.status = CoSignerStatus::Active;
         co_signers.set(member.clone(), record);
-        env.storage().instance().set(&DataKey2::CoSigners, &co_signers);
+        env.storage().instance().set(&DataKey4::CoSigners, &co_signers);
 
         events::emit_co_signer_accepted(&env, group_id, member, co_signer);
         env.storage()
@@ -7952,7 +8019,7 @@ impl AhjoorContract {
         let activation_emitted: bool = env
             .storage()
             .instance()
-            .get(&DataKey2::GroupActivationEmitted)
+            .get(&DataKey4::GroupActivationEmitted)
             .unwrap_or(false);
 
         let mut paid_members: Vec<Address> = env
@@ -8197,7 +8264,7 @@ impl AhjoorContract {
             events::emit_group_activated(&env, start_at);
             env.storage()
                 .instance()
-                .set(&DataKey2::GroupActivationEmitted, &true);
+                .set(&DataKey4::GroupActivationEmitted, &true);
         }
 
         env.storage()
@@ -8249,7 +8316,7 @@ impl AhjoorContract {
         let co_signers: Map<Address, CoSignerRecord> = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSigners)
+            .get(&DataKey4::CoSigners)
             .unwrap_or(Map::new(&env));
         let record = co_signers.get(member.clone()).unwrap_or_else(|| {
             panic_with_error!(&env, ExtError::NoCoSignerFound)
@@ -8273,7 +8340,7 @@ impl AhjoorContract {
         let co_signer_window: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSignerWindowLedgers)
+            .get(&DataKey4::CoSignerWindowLedgers)
             .unwrap_or(0);
         if env.ledger().sequence() >= start + co_signer_window {
             panic_with_error!(&env, ExtError::CoSignerWindowExpired);
@@ -8328,13 +8395,13 @@ impl AhjoorContract {
         let mut co_signers: Map<Address, CoSignerRecord> = env
             .storage()
             .instance()
-            .get(&DataKey2::CoSigners)
+            .get(&DataKey4::CoSigners)
             .unwrap_or(Map::new(&env));
         if !co_signers.contains_key(member.clone()) {
             panic_with_error!(&env, ExtError::NoCoSignerFound);
         }
         co_signers.remove(member.clone());
-        env.storage().instance().set(&DataKey2::CoSigners, &co_signers);
+        env.storage().instance().set(&DataKey4::CoSigners, &co_signers);
 
         let _ = group_id; // used in event
         env.storage()
@@ -8961,7 +9028,7 @@ impl AhjoorContract {
         let use_timestamp = env
             .storage()
             .instance()
-            .get(&DataKey::UseTimestampSchedule)
+            .get(&DataKey2::UseTimestampSchedule)
             .unwrap_or(false);
 
         let expiry_mode = if use_timestamp {
@@ -9439,8 +9506,9 @@ impl AhjoorContract {
             .get(proposal_id)
             .unwrap_or_else(|| panic_with_error!(&env, ExtError::SplitProposalNotFound));
 
+        // #401: expired or already-executed proposals cannot be re-executed
         if proposal.status != SplitProposalStatus::Pending {
-            panic!("Proposal already executed or expired");
+            panic_with_error!(&env, ExtError::SplitProposalNotFound);
         }
         if env.ledger().sequence() > proposal.expiry_ledger {
             panic_with_error!(&env, ExtError::SplitConfirmationWindowClosed);
@@ -9513,6 +9581,38 @@ impl AhjoorContract {
             .set(&DataKey3::SplitProposals, &proposals);
 
         events::emit_group_split_executed(&env, group_id, group_a_id, group_b_id);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// #401: Expire a split proposal whose confirmation window has closed.
+    /// Callable by anyone once env.ledger().sequence() > proposal.expiry_ledger.
+    /// Sets status to Expired so execute_group_split returns SplitProposalNotFound.
+    pub fn expire_split_proposal(env: Env, proposal_id: u32) {
+        internals::check_not_paused(&env);
+
+        let mut proposals: Map<u32, SplitProposal> = env
+            .storage()
+            .instance()
+            .get(&DataKey3::SplitProposals)
+            .unwrap_or(Map::new(&env));
+        let mut proposal = proposals
+            .get(proposal_id)
+            .unwrap_or_else(|| panic_with_error!(&env, ExtError::SplitProposalNotFound));
+
+        if proposal.status != SplitProposalStatus::Pending {
+            panic_with_error!(&env, ExtError::SplitProposalNotFound);
+        }
+        if env.ledger().sequence() <= proposal.expiry_ledger {
+            panic_with_error!(&env, ExtError::SplitMembersInvalid);
+        }
+
+        proposal.status = SplitProposalStatus::Expired;
+        proposals.set(proposal_id, proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey3::SplitProposals, &proposals);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -10184,7 +10284,7 @@ impl AhjoorContract {
         internals::check_not_frozen(&env);
         member.require_auth();
 
-        let start_at: u64 = env.storage().instance().get(&DataKey2::StartAt).unwrap_or(env.ledger().timestamp());
+        let start_at: u64 = env.storage().instance().get(&DataKey4::StartAt).unwrap_or(env.ledger().timestamp());
         if env.ledger().timestamp() < start_at {
             panic_with_error!(&env, ExtError::GroupNotYetActive);
         }

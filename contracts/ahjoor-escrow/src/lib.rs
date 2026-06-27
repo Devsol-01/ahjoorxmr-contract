@@ -6144,10 +6144,10 @@ impl AhjoorEscrowContract {
             .expect("Escrow not found");
 
         if escrow.status != EscrowStatus::BountyClaimed {
-            panic!("Bounty is not in claimed status");
+            panic!("Bounty must be claimed before submitting milestones");
         }
         if escrow.seller != solver {
-            panic!("Only the assigned solver can submit milestones");
+            panic!("Only the solver can submit milestones");
         }
 
         let current_time = env.ledger().timestamp();
@@ -6162,7 +6162,7 @@ impl AhjoorEscrowContract {
             .expect("No milestones for this bounty");
 
         if index >= states.len() {
-            panic!("Milestone index out of range");
+            panic!("Milestone index out of bounds");
         }
 
         // Enforce strict ordering: all earlier milestones must already be paid.

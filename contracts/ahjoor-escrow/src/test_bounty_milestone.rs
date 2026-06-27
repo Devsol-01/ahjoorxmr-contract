@@ -336,6 +336,18 @@ fn test_all_milestones_can_be_verified_independently_by_different_verifiers() {
     assert_eq!(hx.client.get_escrow(&id).status, EscrowStatus::Released);
 }
 
+/// #419: Out-of-order submission must be rejected before any prior milestone is verified.
+#[test]
+#[should_panic(expected = "Previous milestone not yet verified")]
+fn test_out_of_order_submission_rejected() {
+    let hx = setup();
+    let id = create_two_milestone_bounty(&hx);
+    hx.client.claim_bounty(&hx.solver, &id);
+
+    // Milestone 0 is Pending (not yet verified). Submitting milestone 1 must fail.
+    hx.client.submit_bounty_milestone(&hx.solver, &id, &1, &h(&hx.env, 12));
+}
+
 #[test]
 #[should_panic(expected = "Milestone index out of bounds")]
 fn test_submit_invalid_milestone_index() {

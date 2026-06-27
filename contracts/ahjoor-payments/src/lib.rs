@@ -367,6 +367,8 @@ pub enum PaymentStatus {
     CoolingOff = 8,
     /// Payment cancelled during cooling-off period (#309)
     CancelledInCoolingOff = 9,
+    /// Dispute has exceeded the escalation timeout and is awaiting priority resolution (#417)
+    EscalatedDispute = 10,
 }
 
 #[contracttype]
@@ -1972,7 +1974,9 @@ impl AhjoorPaymentsContract {
             .get(&DataKey::Payment(payment_id))
             .expect("Payment not found");
 
-        if payment.status != PaymentStatus::Disputed {
+        if payment.status != PaymentStatus::Disputed
+            && payment.status != PaymentStatus::EscalatedDispute
+        {
             panic!("Payment is not disputed");
         }
 
@@ -2399,9 +2403,9 @@ impl AhjoorPaymentsContract {
             .unwrap_or(DEFAULT_MAX_COOLING_OFF_LEDGERS)
     }
 
-    /// Check if escalation timeout reached
+    /// Check if escalation timeout reached; if so, transition payment to EscalatedDispute (#417)
     pub fn check_escalation(env: Env, payment_id: u32) -> bool {
-        let payment: Payment = env
+        let mut payment: Payment = env
             .storage()
             .persistent()
             .get(&DataKey::Payment(payment_id))
@@ -2429,7 +2433,23 @@ impl AhjoorPaymentsContract {
 
         let elapsed = env.ledger().timestamp() - dispute.created_at;
         if elapsed > timeout {
+            let old_status = payment.status;
+            payment.status = PaymentStatus::EscalatedDispute;
+            env.storage()
+                .persistent()
+                .set(&DataKey::Payment(payment_id), &payment);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Payment(payment_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
             events::emit_dispute_escalated(&env, payment_id, elapsed);
+            events::emit_payment_status_changed(
+                &env,
+                payment_id,
+                old_status,
+                PaymentStatus::EscalatedDispute,
+            );
             return true;
         }
 
@@ -10307,5 +10327,8 @@ mod test_oracle_staleness;
 mod test_dao_mediation;
 #[cfg(test)]
 mod test_kyb;
+
+#[cfg(test)]
+mod test;
 
 pub use events::*;

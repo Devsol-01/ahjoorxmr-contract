@@ -802,7 +802,8 @@ pub fn emit_escrow_metadata_updated(
 #[derive(Clone, Debug)]
 pub struct MultiPartyEscrowCreated {
     pub escrow_id: u32,
-    pub sellers_count: u32,
+    pub buyer_count: u32,
+    pub total_amount: i128,
 }
 
 /// Event: Multi-party escrow released with distributions
@@ -813,10 +814,11 @@ pub struct MultiPartyEscrowReleased {
     pub total_amount: i128,
 }
 
-pub fn emit_multi_party_escrow_created(e: &Env, escrow_id: u32, sellers_count: u32) {
+pub fn emit_multi_party_escrow_created(e: &Env, escrow_id: u32, buyer_count: u32, total_amount: i128) {
     MultiPartyEscrowCreated {
         escrow_id,
-        sellers_count,
+        buyer_count,
+        total_amount,
     }
     .publish(e);
 }

@@ -469,6 +469,12 @@ pub enum DataKey2 {
     InspectorRulingAppealed(u32),
     /// #376: ordered milestone schedule for a milestone-gated bounty (escrow_id → Vec<BountyMilestone>)
     BountyMilestones(u32),
+    /// #421: buyer list for a multi-buyer escrow (escrow_id → Vec<Address>)
+    MultiBuyerList(u32),
+    /// #421: buyer contribution shares (escrow_id → Map<Address, i128>)
+    BuyerShares(u32),
+    /// #421: buyers that approved release so far (escrow_id → Vec<Address>)
+    MultiBuyerReleaseApprovals(u32),
     /// Set to true once add_allowed_token is called; activates internal token allowlist enforcement.
     AllowlistActivated,
 }
@@ -852,6 +858,174 @@ impl AhjoorEscrowContract {
         };
 
         Self::create_escrow_core(&env, &buyer, request)
+    }
+
+    /// Create a multi-buyer escrow where each buyer funds a fixed share.
+    /// Buyers pre-approve allowances to this contract and are pulled via transfer_from.
+    pub fn create_multi_buyer_escrow(
+        env: Env,
+        buyers: Vec<(Address, i128)>,
+        seller: Address,
+        arbiter: Address,
+        token: Address,
+        deadline: u64,
+    ) -> u32 {
+        Self::require_not_paused(&env);
+        Self::require_token_allowed(&env, &token);
+
+        if buyers.is_empty() {
+            panic!("At least one buyer is required");
+        }
+        if deadline <= env.ledger().timestamp() {
+            panic!("Deadline must be in the future");
+        }
+
+        let token_client = token::Client::new(&env, &token);
+        let mut seen: Vec<Address> = Vec::new(&env);
+        let mut buyer_list: Vec<Address> = Vec::new(&env);
+        let mut buyer_shares: Map<Address, i128> = Map::new(&env);
+        let mut total_amount: i128 = 0;
+
+        for i in 0..buyers.len() {
+            let (buyer, amount) = buyers.get(i).unwrap();
+            if amount <= 0 {
+                panic!("Buyer contribution must be positive");
+            }
+            if seen.contains(&buyer) {
+                panic!("Duplicate buyer in buyer list");
+            }
+            seen.push_back(buyer.clone());
+            buyer_list.push_back(buyer.clone());
+            buyer_shares.set(buyer.clone(), amount);
+            total_amount = total_amount
+                .checked_add(amount)
+                .expect("Total amount overflow");
+
+            token_client.transfer_from(
+                &env.current_contract_address(),
+                &buyer,
+                &env.current_contract_address(),
+                &amount,
+            );
+        }
+
+        let escrow_id = Self::next_escrow_id(&env);
+        let primary_buyer = buyer_list.get(0).unwrap();
+        let now = env.ledger().timestamp();
+
+        let mut sellers: Vec<(Address, u32)> = Vec::new(&env);
+        sellers.push_back((seller.clone(), 10_000));
+
+        let escrow = Escrow {
+            id: escrow_id,
+            buyer: primary_buyer.clone(),
+            seller: seller.clone(),
+            arbiter: arbiter.clone(),
+            amount: total_amount,
+            original_amount: total_amount,
+            token: token.clone(),
+            status: EscrowStatus::Active,
+            created_at: now,
+            deadline,
+            metadata_hash: None,
+            sellers,
+            extensions: EscrowExtensions {
+                auto_renew: false,
+                renewal_count: 0,
+                renewals_remaining: 0,
+                dispute_timeout_seconds: None,
+                buyer_inactivity_secs: 0,
+                min_lock_until: None,
+                release_base: None,
+                release_quote: None,
+                release_comparison: None,
+                release_threshold_price: None,
+                arbiter_fee_bps: None,
+                dispute_default_winner: None,
+                required_collateral_bps: 0,
+                collateral_forfeit_bps: 0,
+                collateral_deposit_deadline: 0,
+                collateral_amount: 0,
+                delivery_proof_hash: None,
+                inspector: None,
+                auto_renew_max_renewals: None,
+                auto_renew_interval_ledgers: None,
+                renewals_completed: 0,
+            },
+            top_up_history: Vec::new(&env),
+            top_up_acknowledged: true,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Escrow(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::MultiBuyerList(escrow_id), &buyer_list);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::MultiBuyerList(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey2::BuyerShares(escrow_id), &buyer_shares);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::BuyerShares(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey2::MultiBuyerReleaseApprovals(escrow_id), &Vec::<Address>::new(&env));
+        env.storage().persistent().extend_ttl(
+            &DataKey2::MultiBuyerReleaseApprovals(escrow_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        // Mint EscrowReceipt assigned to seller for consistency with single-buyer flow.
+        let receipt_id = Self::next_receipt_id(&env);
+        let receipt = EscrowReceipt {
+            receipt_id,
+            escrow_id,
+            holder: seller.clone(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowReceipt(receipt_id), &receipt);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowReceiptByEscrow(escrow_id), &receipt_id);
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscrowReceipt(receipt_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        events::emit_escrow_receipt_minted(&env, receipt_id, escrow_id, seller.clone());
+
+        events::emit_escrow_created(
+            &env,
+            escrow_id,
+            primary_buyer,
+            seller.clone(),
+            arbiter,
+            total_amount,
+            token,
+            deadline,
+        );
+        events::emit_multi_party_escrow_created(&env, escrow_id, buyers.len(), total_amount);
+
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        escrow_id
     }
 
     /// Create up to 10 escrows in one atomic transaction.
@@ -1414,7 +1588,7 @@ impl AhjoorEscrowContract {
 
         // Emit multi-party event if more than one seller
         if resolved_sellers.len() > 1 {
-            events::emit_multi_party_escrow_created(env, escrow_id, resolved_sellers.len());
+            events::emit_multi_party_escrow_created(env, escrow_id, 1, amount);
         }
 
         if let Some(lock_until) = escrow.extensions.min_lock_until {
@@ -1568,7 +1742,50 @@ impl AhjoorEscrowContract {
             panic!("Escrow is not active");
         }
 
-        if caller != escrow.buyer && caller != escrow.arbiter {
+        let multi_buyers_opt: Option<Vec<Address>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MultiBuyerList(escrow_id));
+        if let Some(multi_buyers) = multi_buyers_opt {
+            // Multi-buyer escrows require unanimous buyer approval on direct release.
+            let mut is_buyer = false;
+            for b in multi_buyers.iter() {
+                if b == caller {
+                    is_buyer = true;
+                    break;
+                }
+            }
+            if !is_buyer {
+                panic!("Only a listed buyer can approve multi-buyer release");
+            }
+
+            let mut approvals: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey2::MultiBuyerReleaseApprovals(escrow_id))
+                .unwrap_or(Vec::new(&env));
+            for a in approvals.iter() {
+                if a == caller {
+                    panic!("Buyer has already approved release");
+                }
+            }
+            approvals.push_back(caller.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey2::MultiBuyerReleaseApprovals(escrow_id), &approvals);
+            env.storage().persistent().extend_ttl(
+                &DataKey2::MultiBuyerReleaseApprovals(escrow_id),
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+
+            if approvals.len() < multi_buyers.len() {
+                env.storage()
+                    .instance()
+                    .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+                return;
+            }
+        } else if caller != escrow.buyer && caller != escrow.arbiter {
             panic!("Only buyer or arbiter can release escrow");
         }
 
@@ -2588,11 +2805,7 @@ impl AhjoorEscrowContract {
         let seller_amount = distributable - buyer_amount;
 
         if buyer_amount > 0 {
-            client.transfer(
-                &env.current_contract_address(),
-                &escrow.buyer,
-                &buyer_amount,
-            );
+            Self::transfer_to_buyers(env, &escrow, buyer_amount, escrow_id);
         }
         if seller_amount > 0 {
             client.transfer(
@@ -2614,7 +2827,7 @@ impl AhjoorEscrowContract {
                 let forfeit = (collateral * escrow.extensions.collateral_forfeit_bps as i128) / 10_000;
                 let returned = collateral - forfeit;
                 if forfeit > 0 {
-                    client.transfer(&env.current_contract_address(), &escrow.buyer, &forfeit);
+                    Self::transfer_to_buyers(env, &escrow, forfeit, escrow_id);
                     events::emit_collateral_forfeited(env, escrow_id, forfeit, escrow.buyer.clone());
                 }
                 if returned > 0 {
@@ -2900,11 +3113,7 @@ impl AhjoorEscrowContract {
             );
             escrow.status = EscrowStatus::Released;
         } else {
-            client.transfer(
-                &env.current_contract_address(),
-                &escrow.buyer,
-                &escrow.amount,
-            );
+            Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
             escrow.status = EscrowStatus::Refunded;
         }
 
@@ -3307,12 +3516,7 @@ impl AhjoorEscrowContract {
 
         escrow.buyer.require_auth();
 
-        let client = token::Client::new(&env, &escrow.token);
-        client.transfer(
-            &env.current_contract_address(),
-            &escrow.buyer,
-            &escrow.amount,
-        );
+        Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
 
         escrow.status = EscrowStatus::Refunded;
         // Burn associated receipt on refund
@@ -3648,7 +3852,7 @@ impl AhjoorEscrowContract {
                 token_client.transfer(&escrow.buyer, &env.current_contract_address(), &delta);
             } else if new_amount < escrow.amount {
                 let delta = escrow.amount - new_amount;
-                token_client.transfer(&env.current_contract_address(), &escrow.buyer, &delta);
+                Self::transfer_to_buyers(&env, &escrow, delta, escrow_id);
             }
             escrow.amount = new_amount;
         }
@@ -4359,8 +4563,7 @@ impl AhjoorEscrowContract {
         if escrow.buyer != buyer { panic!("Only buyer can cancel"); }
         if escrow.status == EscrowStatus::Disputed || escrow.status == EscrowStatus::PartiallyDisputed { panic!("Dispute active"); }
         if escrow.status != EscrowStatus::Active { panic!("Escrow not active"); }
-        let client = token::Client::new(&env, &escrow.token);
-        client.transfer(&env.current_contract_address(), &buyer, &escrow.amount);
+        Self::transfer_to_buyers(&env, &escrow, escrow.amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
         env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
         env.storage().persistent().extend_ttl(&DataKey::Escrow(escrow_id), PERSISTENT_LIFETIME_THRESHOLD, PERSISTENT_BUMP_AMOUNT);
@@ -5154,11 +5357,7 @@ impl AhjoorEscrowContract {
 
         // Return funds to buyer
         if return_amount > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &escrow.buyer,
-                &return_amount,
-            );
+            Self::transfer_to_buyers(&env, &escrow, return_amount, escrow_id);
         }
 
         // Send penalty to fee collector if configured
@@ -5175,11 +5374,7 @@ impl AhjoorEscrowContract {
                 );
             } else {
                 // No fee recipient — return penalty to buyer too
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &escrow.buyer,
-                    &penalty_amount,
-                );
+                Self::transfer_to_buyers(&env, &escrow, penalty_amount, escrow_id);
             }
         }
 
@@ -5708,11 +5903,9 @@ impl AhjoorEscrowContract {
             .amount
             .checked_sub(bounty_data.fees_disbursed)
             .expect("Disbursed fees exceed bounty amount");
-        let token_client = token::Client::new(&env, &escrow.token);
-
         // Refund buyer
         if refund_amount > 0 {
-            token_client.transfer(&env.current_contract_address(), &buyer, &refund_amount);
+            Self::transfer_to_buyers(&env, &escrow, refund_amount, escrow_id);
         }
 
         // Update escrow status
@@ -6931,6 +7124,56 @@ impl AhjoorEscrowContract {
         }
     }
 
+    fn transfer_to_buyers(env: &Env, escrow: &Escrow, total: i128, escrow_id: u32) {
+        let client = token::Client::new(env, &escrow.token);
+        let buyers_opt: Option<Vec<Address>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::MultiBuyerList(escrow_id));
+        let shares_opt: Option<Map<Address, i128>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::BuyerShares(escrow_id));
+
+        if buyers_opt.is_none() || shares_opt.is_none() {
+            client.transfer(&env.current_contract_address(), &escrow.buyer, &total);
+            return;
+        }
+
+        let buyers = buyers_opt.unwrap();
+        let shares = shares_opt.unwrap();
+        if buyers.is_empty() || total <= 0 {
+            return;
+        }
+
+        let mut total_shares: i128 = 0;
+        for i in 0..buyers.len() {
+            let buyer = buyers.get(i).unwrap();
+            total_shares += shares.get(buyer).unwrap_or(0);
+        }
+        if total_shares <= 0 {
+            client.transfer(&env.current_contract_address(), &escrow.buyer, &total);
+            return;
+        }
+
+        let mut distributed: i128 = 0;
+        for i in 1..buyers.len() {
+            let buyer = buyers.get(i).unwrap();
+            let share = shares.get(buyer.clone()).unwrap_or(0);
+            let payout = (total * share) / total_shares;
+            if payout > 0 {
+                client.transfer(&env.current_contract_address(), &buyer, &payout);
+            }
+            distributed += payout;
+        }
+
+        let first_buyer = buyers.get(0).unwrap();
+        let first_payout = total - distributed;
+        if first_payout > 0 {
+            client.transfer(&env.current_contract_address(), &first_buyer, &first_payout);
+        }
+    }
+
     fn transfer_to_sellers(env: &Env, escrow: &Escrow, total: i128, escrow_id: u32) {
         let client = token::Client::new(env, &escrow.token);
         if escrow.sellers.len() <= 1 {
@@ -7926,9 +8169,8 @@ impl AhjoorEscrowContract {
             .persistent()
             .remove(&DataKey2::VetoTimestamp(escrow_id));
         // Release funds to buyer
-        let token_client = token::Client::new(&env, &escrow.token);
         let amount = escrow.amount;
-        token_client.transfer(&env.current_contract_address(), &escrow.buyer, &amount);
+        Self::transfer_to_buyers(&env, &escrow, amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
         env.storage()
             .persistent()
@@ -8044,8 +8286,7 @@ impl AhjoorEscrowContract {
             panic!("No pending seller transfer");
         }
         let amount = escrow.amount;
-        let token_client = token::Client::new(&env, &escrow.token);
-        token_client.transfer(&env.current_contract_address(), &buyer, &amount);
+        Self::transfer_to_buyers(&env, &escrow, amount, escrow_id);
         escrow.status = EscrowStatus::Refunded;
         env.storage()
             .persistent()
@@ -8444,3 +8685,5 @@ mod test_milestone_bps;
 mod test_bounty_board;
 #[cfg(test)]
 mod test_bounty_milestone;
+#[cfg(test)]
+mod test_multi_buyer;

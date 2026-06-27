@@ -208,6 +208,8 @@ pub enum Error {
     DaoMinVotesNotMet = 58,
     /// Payment is not in Disputed status; cannot escalate.
     PaymentNotDisputed = 59,
+    /// Merchant has KYB on record, but it is now expired.
+    MerchantKYBExpired = 60,
 }
 
 /// Per-merchant withdrawal rate limit config (#231).
@@ -565,6 +567,8 @@ pub const MAX_CUSTOMER_PAYMENTS_PAGE_SIZE: u32 = 50;
 
 /// Max pauses per subscription before denial (#327)
 const MAX_SUBSCRIPTION_PAUSES: u32 = 3;
+/// Approximate ledger close time used for subscription proration calculations.
+const LEDGER_CLOSE_TIME_SECONDS: u64 = 5;
 
 /// Paginated view over a customer's payment IDs (#132).
 #[contracttype]
@@ -599,6 +603,24 @@ pub struct Subscription {
     pub pause_authority: PauseAuthority,
     /// Count of times this subscription has been paused (#327)
     pub pause_count: u32,
+    /// Optional current plan reference for plan-switch lifecycle.
+    pub plan_id: Option<u32>,
+    /// Approximate next due ledger used for plan-change proration.
+    pub next_due_ledger: u64,
+    /// One-time credit to be applied to the next charge after plan change.
+    pub pending_prorated_credit: i128,
+}
+
+/// Merchant-defined subscription billing plan.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionPlan {
+    pub plan_id: u32,
+    pub merchant: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub interval_days: u64,
+    pub active: bool,
 }
 
 #[contracttype]
@@ -869,6 +891,8 @@ pub enum DataKey {
     // --- Task 2: Multi-Sig ---
     /// Instance: per-merchant multi-sig policy
     MultisigPolicy(Address),
+    /// Instance: when true, merchant KYB checks are enforced on payment creation.
+    KYBRequired,
 }
 
 /// Overflow storage keys — split from DataKey because #[contracttype] is bounded to 50 variants.
@@ -1013,6 +1037,8 @@ pub enum DataKey3 {
     DaoVoteWindowSeconds,
     /// Instance: minimum votes required for a valid verdict
     DaoMinVotes,
+    /// Persistent: merchant-defined subscription billing plan
+    SubscriptionPlan(u32),
 }
 
 mod events;
@@ -1175,6 +1201,7 @@ impl AhjoorPaymentsContract {
         env.storage()
             .instance()
             .set(&DataKey2::WithdrawalWindowCap, &i128::MAX);
+        env.storage().instance().set(&DataKey::KYBRequired, &false);
 
         env.storage()
             .instance()
@@ -1369,9 +1396,26 @@ impl AhjoorPaymentsContract {
 
         // KYB enforcement check (#310)
         if Self::is_kyb_enforcement_enabled(env.clone()) {
-            let kyb_status = Self::get_merchant_kyb_status(env.clone(), merchant.clone());
-            if !kyb_status.verified {
+            let kyb_key = DataKey2::MerchantKYB(merchant.clone());
+            let current_ledger = u64::from(env.ledger().sequence());
+            let kyb = env
+                .storage()
+                .persistent()
+                .get::<_, MerchantKYB>(&kyb_key);
+            if kyb.is_none() {
                 panic_with_error!(&env, Error::KYBVerificationRequired);
+            }
+            env.storage().persistent().extend_ttl(
+                &kyb_key,
+                PERSISTENT_LIFETIME_THRESHOLD,
+                PERSISTENT_BUMP_AMOUNT,
+            );
+            let kyb = kyb.expect("kyb exists");
+            if kyb.revoked {
+                panic_with_error!(&env, Error::KYBVerificationRequired);
+            }
+            if current_ledger > kyb.expiry_ledger {
+                panic_with_error!(&env, Error::MerchantKYBExpired);
             }
         }
 
@@ -4910,6 +4954,9 @@ impl AhjoorPaymentsContract {
             trial_ends_at,
             pause_authority: PauseAuthority::Subscriber, // Default to subscriber only
             pause_count: 0,
+            plan_id: None,
+            next_due_ledger: u64::from(env.ledger().sequence()) + Self::seconds_to_ledgers(interval_seconds),
+            pending_prorated_credit: 0,
         };
 
         env.storage()
@@ -4975,15 +5022,26 @@ impl AhjoorPaymentsContract {
         let trial_just_ended = sub.charges_count == 0 && sub.trial_ends_at > 0;
 
         let client = token::Client::new(&env, &sub.token);
+        let mut charge_amount = sub.amount;
+        if sub.pending_prorated_credit > 0 {
+            // Apply one-time credit on the first charge after plan change.
+            if sub.pending_prorated_credit >= charge_amount {
+                charge_amount = 0;
+            } else {
+                charge_amount -= sub.pending_prorated_credit;
+            }
+            sub.pending_prorated_credit = 0;
+        }
         client.transfer(
             &sub.subscriber,
             &env.current_contract_address(),
-            &sub.amount,
+            &charge_amount,
         );
-        client.transfer(&env.current_contract_address(), &sub.merchant, &sub.amount);
+        client.transfer(&env.current_contract_address(), &sub.merchant, &charge_amount);
 
         sub.last_charged_at = now;
         sub.charges_count += 1;
+        sub.next_due_ledger = u64::from(env.ledger().sequence()) + Self::seconds_to_ledgers(sub.interval_seconds);
 
         env.storage()
             .persistent()
@@ -4999,7 +5057,7 @@ impl AhjoorPaymentsContract {
             subscription_id,
             sub.subscriber,
             sub.merchant,
-            sub.amount,
+            charge_amount,
             now,
         );
         if trial_just_ended {
@@ -5119,6 +5177,7 @@ impl AhjoorPaymentsContract {
         // Reset last_charged_at so the next interval starts from now,
         // ensuring paused duration does not count.
         sub.last_charged_at = now;
+        sub.next_due_ledger = u64::from(env.ledger().sequence()) + Self::seconds_to_ledgers(sub.interval_seconds);
 
         env.storage()
             .persistent()
@@ -5219,6 +5278,7 @@ impl AhjoorPaymentsContract {
         // Convert interval_seconds to approximate ledgers (~5s per ledger)
         let interval_ledgers = ((sub.interval_seconds + 4) / 5) as u32; // Round up
         let next_due_ledger = env.ledger().sequence() + interval_ledgers;
+        sub.next_due_ledger = u64::from(next_due_ledger);
 
         env.storage()
             .persistent()
@@ -5257,6 +5317,7 @@ impl AhjoorPaymentsContract {
 
         let interval_ledgers = ((sub.interval_seconds + 4) / 5) as u32;
         let next_due_ledger = env.ledger().sequence() + interval_ledgers;
+        sub.next_due_ledger = u64::from(next_due_ledger);
 
         env.storage()
             .persistent()
@@ -5273,6 +5334,142 @@ impl AhjoorPaymentsContract {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         next_due_ledger
+    }
+
+    /// Admin creates or updates a subscription billing plan.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_subscription_plan(
+        env: Env,
+        admin: Address,
+        plan_id: u32,
+        merchant: Address,
+        token: Address,
+        amount: i128,
+        interval_days: u64,
+        active: bool,
+    ) {
+        Self::require_not_paused(&env);
+        Self::require_admin(&env, &admin);
+
+        if amount <= 0 {
+            panic!("Plan amount must be positive");
+        }
+        if interval_days == 0 {
+            panic!("Plan interval_days must be positive");
+        }
+
+        let plan = SubscriptionPlan {
+            plan_id,
+            merchant,
+            token,
+            amount,
+            interval_days,
+            active,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey3::SubscriptionPlan(plan_id), &plan);
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SubscriptionPlan(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Read a subscription billing plan by ID.
+    pub fn get_subscription_plan(env: Env, plan_id: u32) -> SubscriptionPlan {
+        let plan: SubscriptionPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SubscriptionPlan(plan_id))
+            .expect("Subscription plan not found");
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SubscriptionPlan(plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        plan
+    }
+
+    /// Subscriber switches to another plan with a one-time prorated credit.
+    pub fn change_subscription_plan(env: Env, subscription_id: u32, new_plan_id: u32) {
+        Self::require_not_paused(&env);
+
+        let mut sub: Subscription = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Subscription(subscription_id))
+            .expect("Subscription not found");
+        sub.subscriber.require_auth();
+
+        if !sub.active {
+            panic!("Subscription is cancelled");
+        }
+        if sub.paused {
+            panic_with_error!(&env, Error::SubscriptionPaused);
+        }
+
+        let new_plan: SubscriptionPlan = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::SubscriptionPlan(new_plan_id))
+            .expect("Subscription plan not found");
+        if !new_plan.active {
+            panic!("Subscription plan inactive");
+        }
+        if new_plan.merchant != sub.merchant {
+            panic!("Plan merchant mismatch");
+        }
+        if new_plan.token != sub.token {
+            panic!("Plan token mismatch");
+        }
+
+        let current_ledger = u64::from(env.ledger().sequence());
+        let old_plan_id = sub.plan_id.unwrap_or(0);
+        let current_plan_amount = sub.amount;
+        let current_plan_interval_days = core::cmp::max(1, sub.interval_seconds / 86_400);
+        let days_remaining = if sub.next_due_ledger > current_ledger {
+            ((sub.next_due_ledger - current_ledger) * LEDGER_CLOSE_TIME_SECONDS) / 86_400
+        } else {
+            0
+        };
+        let prorated_credit =
+            (current_plan_amount * i128::from(days_remaining)) / i128::from(current_plan_interval_days);
+
+        sub.plan_id = Some(new_plan_id);
+        sub.amount = new_plan.amount;
+        sub.interval_seconds = new_plan.interval_days * 86_400;
+        sub.next_due_ledger = current_ledger + Self::seconds_to_ledgers(sub.interval_seconds);
+        sub.pending_prorated_credit = if prorated_credit > 0 { prorated_credit } else { 0 };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Subscription(subscription_id), &sub);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Subscription(subscription_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey3::SubscriptionPlan(new_plan_id),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_subscription_plan_changed(
+            &env,
+            subscription_id,
+            old_plan_id,
+            new_plan_id,
+            sub.pending_prorated_credit,
+        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 
     // --- Payment Categories (#122) ---
@@ -5896,6 +6093,10 @@ impl AhjoorPaymentsContract {
         if stored_admin != *admin {
             panic!("Only admin can manage pause state");
         }
+    }
+
+    fn seconds_to_ledgers(seconds: u64) -> u64 {
+        (seconds + LEDGER_CLOSE_TIME_SECONDS - 1) / LEDGER_CLOSE_TIME_SECONDS
     }
 
     /// Validates that a token is allowed via the whitelist contract
@@ -8717,10 +8918,52 @@ impl AhjoorPaymentsContract {
 
         env.storage()
             .instance()
+            .set(&DataKey::KYBRequired, &enabled);
+        // Keep the legacy key in sync for backward compatibility across upgrades.
+        env.storage()
+            .instance()
             .set(&DataKey2::KYBEnforcementEnabled, &enabled);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Admin renews an existing merchant KYB record with a new hash/expiry (#310)
+    pub fn renew_merchant_kyb(
+        env: Env,
+        admin: Address,
+        merchant: Address,
+        new_kyb_hash: BytesN<32>,
+        new_expiry_ledger: u64,
+        jurisdiction: String,
+    ) {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("Not initialized");
+        if admin != stored_admin {
+            panic!("Only admin can renew merchant KYB");
+        }
+
+        let kyb = MerchantKYB {
+            kyb_hash: new_kyb_hash.clone(),
+            expiry_ledger: new_expiry_ledger,
+            jurisdiction: jurisdiction.clone(),
+            revoked: false,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::MerchantKYB(merchant.clone()), &kyb);
+        env.storage().persistent().extend_ttl(
+            &DataKey2::MerchantKYB(merchant.clone()),
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        events::emit_merchant_kyb_set(&env, merchant, new_kyb_hash, new_expiry_ledger, jurisdiction);
     }
 
     /// Admin revokes a merchant's KYB verification (#310)
@@ -8788,7 +9031,12 @@ impl AhjoorPaymentsContract {
     pub fn is_kyb_enforcement_enabled(env: Env) -> bool {
         env.storage()
             .instance()
-            .get::<_, bool>(&DataKey2::KYBEnforcementEnabled)
+            .get::<_, bool>(&DataKey::KYBRequired)
+            .or_else(|| {
+                env.storage()
+                    .instance()
+                    .get::<_, bool>(&DataKey2::KYBEnforcementEnabled)
+            })
             .unwrap_or(false)
     }
     /// Returns the current maximum tip in basis points (default: 3 000).
@@ -10057,5 +10305,7 @@ mod test_oracle_staleness;
 
 #[cfg(test)]
 mod test_dao_mediation;
+#[cfg(test)]
+mod test_kyb;
 
 pub use events::*;

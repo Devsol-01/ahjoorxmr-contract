@@ -119,6 +119,7 @@ pub enum ProposalType {
     MemberRemoval = 2,
     MaxMembersUpdate = 3,
     Reinstatement = 4, // #218
+    MemberFreeze = 5,  // Member-initiated emergency freeze
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,6 +316,8 @@ pub enum DataKey3 {
     MinCreditScore,          // i128 — minimum score required to join this group
     // #398: Contribution-weight voting delegation
     ContribDelegations,      // Map<Address, ContribDelegationRecord>
+    // Member freeze proposal context
+    MemberFreezeReasons,     // Map<u32, BytesN<32>> — proposal_id -> freeze reason hash
     // #390: Timestamp-mode grace period
     GracePeriodSeconds,      // u64 — grace window in seconds (used when UseTimestampSchedule=true)
     // Reputation-gated fee discount

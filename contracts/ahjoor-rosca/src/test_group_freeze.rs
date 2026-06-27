@@ -166,3 +166,46 @@ fn test_freeze_log_appended() {
     assert!(record.unfrozen_at_ledger.is_some());
     assert_eq!(record.resolution_hash, Some(resolution_hash(&env)));
 }
+
+#[test]
+fn test_member_freeze_proposal_executes_and_freezes_group() {
+    let (env, client, admin, _token_admin, members) = setup_freeze_test();
+    let member1 = members.get(0).unwrap();
+    let member2 = members.get(1).unwrap();
+    let member3 = members.get(2).unwrap();
+    let member_reason = BytesN::from_array(&env, &[7u8; 32]);
+
+    client.propose_member_freeze(&member1, &member_reason);
+    let proposal = client.get_proposal(&0).unwrap();
+    assert_eq!(proposal.proposal_type, ProposalType::MemberFreeze);
+    assert_eq!(proposal.required_quorum, 6_700);
+
+    client.vote_on_proposal(&member1, &0, &true);
+    client.vote_on_proposal(&member2, &0, &true);
+    client.vote_on_proposal(&member3, &0, &true);
+
+    env.ledger().set_timestamp(100_000);
+    client.execute_proposal(&0);
+
+    // Group should now be frozen until admin unfreezes
+    let contribute_res = client.try_contribute(&member1, &_token_admin, &100);
+    assert!(contribute_res.is_err());
+
+    // Existing admin unfreeze path still works
+    client.unfreeze_group(&admin, &0, &resolution_hash(&env));
+    client.contribute(&member1, &_token_admin, &100);
+
+    let log = client.get_freeze_log();
+    assert!(log.len() >= 1);
+    let record = log.get(log.len() - 1).unwrap();
+    assert_eq!(record.reason_hash, member_reason);
+}
+
+#[test]
+fn test_non_member_cannot_propose_member_freeze() {
+    let (env, client, _admin, _token_admin, _members) = setup_freeze_test();
+    let outsider = Address::generate(&env);
+
+    let result = client.try_propose_member_freeze(&outsider, &reason_hash(&env));
+    assert!(result.is_err());
+}

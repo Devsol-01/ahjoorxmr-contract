@@ -252,3 +252,48 @@ fn test_confirmation_window_enforced() {
     // Confirmation after window → panic
     client.confirm_split_participation(&m1, &0u32, &proposal_id);
 }
+
+// ── #401 acceptance criteria ─────────────────────────────────────────────────
+
+/// confirm_split after expiry_ledger must return SplitConfirmationWindowClosed (#401).
+#[test]
+fn test_split_confirmation_rejects_after_expiry() {
+    use crate::errors::ExtError;
+    let env = Env::default();
+    let m1 = Address::generate(&env);
+    let m2 = Address::generate(&env);
+    let (client, admin, _token) = setup_split_rosca(&env, &[m1.clone(), m2.clone()]);
+
+    // Window of exactly 10 ledgers
+    client.set_split_confirmation_window(&admin, &10u32);
+
+    let a_members = Vec::from_slice(&env, &[m1.clone()]);
+    let b_members = Vec::from_slice(&env, &[m2.clone()]);
+    let proposal_id =
+        client.propose_group_split(&admin, &0u32, &a_members, &b_members, &dummy_hash(&env));
+
+    // Still within the window — confirmation must succeed
+    client.confirm_split_participation(&m1, &0u32, &proposal_id);
+
+    // Advance past expiry
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100);
+
+    // Confirmation after window must return SplitConfirmationWindowClosed
+    let err = client
+        .try_confirm_split_participation(&m2, &0u32, &proposal_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, ExtError::SplitConfirmationWindowClosed.into());
+
+    // expire_split_proposal must mark the proposal Expired
+    client.expire_split_proposal(&proposal_id);
+    let proposal = client.get_split_proposal(&proposal_id);
+    assert_eq!(proposal.status, SplitProposalStatus::Expired);
+
+    // execute_group_split on an expired proposal must return SplitProposalNotFound
+    let exec_err = client
+        .try_execute_group_split(&admin, &0u32, &proposal_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(exec_err, ExtError::SplitProposalNotFound.into());
+}

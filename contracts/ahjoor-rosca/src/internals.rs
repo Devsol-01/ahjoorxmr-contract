@@ -1,4 +1,4 @@
-use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
+use crate::{errors::{Error, ExtError}, events, audit_trail, ContributionEntry, CycleSnapshotData, DataKey, DataKey2, DataKey3, DataKey4, PersistentKey, PayoutRecord, SlotBid, types::{InsuranceClaim, InsuranceCoverageMode}};
 use soroban_sdk::{panic_with_error, token, Address, Bytes, BytesN, Env, Map, Vec};
 
 /// Returns the timestamp (seconds) after which the grace period for a given round deadline expires.
@@ -23,7 +23,7 @@ pub(crate) fn get_grace_deadline(env: &Env, round_deadline: u64) -> u64 {
         let grace_ledgers: u32 = env
             .storage()
             .instance()
-            .get(&DataKey2::GracePeriodLedgers)
+            .get(&DataKey4::GracePeriodLedgers)
             .unwrap_or(0);
         round_deadline.saturating_add(grace_ledgers as u64)
     }

@@ -108,12 +108,7 @@ fn setup_with_members<'a>(n: usize, mint_amount: i128) -> TestSetup<'a> {
     }
 }
 
-#[test]
-fn test_datakey_variant_count() {
-    assert!(std::mem::variant_count::<DataKey>() < 50, "DataKey must remain under 50 variants");
-    assert!(std::mem::variant_count::<DataKey2>() < 50, "DataKey2 must remain under 50 variants");
-    assert!(std::mem::variant_count::<DataKey3>() < 50, "DataKey3 must remain under 50 variants");
-}
+// test_datakey_variant_count removed: std::mem::variant_count is unavailable in #![no_std]
 
 /// Calls `client.init(...)` on `setup` using sensible defaults:
 /// - All addresses in `setup.members` as the member list
@@ -138,7 +133,6 @@ fn default_init(setup: &TestSetup<'_>) {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -180,7 +174,6 @@ fn test_delayed_start_blocks_then_allows_contribution() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -238,7 +231,6 @@ fn test_cancel_pending_group_refunds_reward_deposit() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -386,7 +378,6 @@ fn test_admin_assigned_strategy_execution() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -433,7 +424,6 @@ fn test_invalid_admin_order_validation() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -497,7 +487,6 @@ fn test_admin_assigned_e2e_all_rounds() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -547,7 +536,6 @@ fn test_single_defaulter_penalty() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -599,7 +587,6 @@ fn test_penalty_deferred_within_grace_period() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 5,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -648,7 +635,6 @@ fn test_penalty_applied_after_grace_boundary() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 5,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -702,7 +688,6 @@ fn test_reputation_score_lifecycle_and_bounds() {
             fee_recipient: None,
             max_defaults: 3,
             grace_period_ledgers: 2,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -785,7 +770,6 @@ fn test_multiple_defaulters_penalty() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -838,7 +822,6 @@ fn test_member_suspension_after_two_defaults() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -914,7 +897,6 @@ fn test_suspended_member_skipped_in_payout() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -993,7 +975,6 @@ fn test_cannot_penalise_before_deadline() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1040,7 +1021,6 @@ fn test_penalty_disabled_when_amount_zero() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1096,7 +1076,6 @@ fn test_cannot_penalise_non_defaulter() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1156,7 +1135,6 @@ fn test_read_interface_lifecycle() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1240,7 +1218,6 @@ fn test_member_status_resets_after_round() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1308,7 +1285,6 @@ fn test_add_member_before_round() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1372,7 +1348,6 @@ fn test_add_member_mid_round_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1434,7 +1409,6 @@ fn test_remove_member_between_rounds() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1500,7 +1474,6 @@ fn test_remove_member_mid_round_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1564,7 +1537,6 @@ fn test_remove_member_who_already_received_payout() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1672,7 +1644,6 @@ fn test_init_with_approved_token() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1722,7 +1693,6 @@ fn test_init_with_unapproved_token_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1765,7 +1735,6 @@ fn test_init_twice_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1795,7 +1764,6 @@ fn test_init_twice_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1834,7 +1802,6 @@ fn test_contribute_non_member_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1879,7 +1846,6 @@ fn test_contribute_twice_panics() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -1929,7 +1895,6 @@ fn test_payout_correct_member_n_group() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2009,7 +1974,6 @@ fn test_contract_balance_zero_after_round() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2059,7 +2023,6 @@ fn test_single_member_rosca() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2113,7 +2076,6 @@ fn test_large_group_rosca() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2172,7 +2134,6 @@ fn test_get_state_lifecycle_details() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2234,7 +2195,6 @@ fn test_bump_storage() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2289,7 +2249,6 @@ fn test_reward_distribution_scenarios() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2379,7 +2338,6 @@ fn test_contribution_pot_separation() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2463,7 +2421,6 @@ fn setup_exit_env(
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2752,7 +2709,6 @@ fn test_exit_with_zero_penalty() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2879,7 +2835,6 @@ fn test_pause_and_resume_flow() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -2956,7 +2911,6 @@ fn test_paused_blocks_contribute() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3003,7 +2957,6 @@ fn test_cannot_pause_already_paused() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3051,7 +3004,6 @@ fn test_cannot_resume_not_paused() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3116,7 +3068,6 @@ fn test_get_member_contribution_status() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3191,7 +3142,6 @@ fn test_overpayment_rejected() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3236,7 +3186,6 @@ fn test_emit_deadline_reminder() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3315,7 +3264,6 @@ fn test_get_upcoming_deadlines() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3365,7 +3313,6 @@ fn test_create_proposal() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3426,7 +3373,6 @@ fn test_vote_on_proposal() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3485,7 +3431,6 @@ fn test_execute_proposal_with_quorum() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3552,7 +3497,6 @@ fn test_proposal_insufficient_quorum() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3616,7 +3560,6 @@ fn test_proposal_voted_down() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3681,7 +3624,6 @@ fn test_penalty_appeal_execution() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3756,7 +3698,6 @@ fn test_member_removal_execution() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3822,7 +3763,6 @@ fn test_non_member_cannot_create_proposal() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3875,7 +3815,6 @@ fn test_cannot_vote_after_deadline() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3936,7 +3875,6 @@ fn test_cannot_vote_twice() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -3987,7 +3925,6 @@ fn test_get_member_status_non_member() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -4036,7 +3973,6 @@ fn test_get_member_status_active_member() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -4090,7 +4026,6 @@ fn test_get_member_status_suspended_member() {
             max_defaults: 2,  // Suspend after 2 defaults
         
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
             max_members: None,
@@ -4146,7 +4081,6 @@ fn test_get_member_status_exited_member() {
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -4516,7 +4450,6 @@ fn setup_finalize_env(
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -4656,7 +4589,6 @@ fn setup_exit_penalty_env(
             max_defaults: 3,
 
             grace_period_ledgers: 0,
-            grace_period_seconds: 0,
         
             use_timestamp_schedule: false,
             round_duration_seconds: 0,
@@ -4791,6 +4723,12 @@ fn setup_grace_env<'a>(
             skip_fee: 0,
             max_skips_per_cycle: 0,
             voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
         },
         &None,
     );
@@ -4917,5 +4855,123 @@ fn test_overflow_guard_on_large_contribution() {
     // Normal group (small amount) must initialize without error
     let setup2 = setup_with_members(3, 1_000_000);
     default_init(&setup2);
+}
+
+// ── #404: reinstate_member must verify proposal is Approved ──────────────────
+
+/// Full reinstatement flow:
+/// 1. Pending proposal → reinstate_member must return ProposalNotPending.
+/// 2. After quorum and execute_proposal → Approved, reinstate_member succeeds.
+/// 3. Calling reinstate_member a second time must fail (mapping cleared).
+#[test]
+fn test_reinstatement_requires_approved_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(AhjoorContract, ());
+    let client = AhjoorContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let token_addr = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_admin_client = TokenAdminClient::new(&env, &token_addr);
+
+    let u1 = Address::generate(&env);
+    let u2 = Address::generate(&env);
+    let u3 = Address::generate(&env);
+    let members = vec![&env, u1.clone(), u2.clone(), u3.clone()];
+
+    for user in [&u1, &u2, &u3] {
+        token_admin_client.mint(user, &5000);
+    }
+
+    client.init(
+        &admin,
+        &members,
+        &100,
+        &token_addr,
+        &3600,
+        &RoscaConfig {
+            strategy: PayoutStrategy::RoundRobin,
+            custom_order: None,
+            penalty_amount: 25,
+            exit_penalty_bps: 0,
+            collective_goal: None,
+            member_goals: None,
+            fee_bps: 0,
+            fee_recipient: None,
+            max_defaults: 2,
+            grace_period_ledgers: 0,
+            grace_period_seconds: 0,
+            use_timestamp_schedule: false,
+            round_duration_seconds: 0,
+            max_members: None,
+            skip_fee: 0,
+            max_skips_per_cycle: 0,
+            voting_mode: VotingMode::Equal,
+            late_fee_bps: 0,
+            auction_enabled: false,
+            auction_window_ledgers: 0,
+            randomize_payout_order: false,
+            reserve_enabled: false,
+            reserve_contribution_bps: 0,
+        },
+        &None,
+    );
+
+    // Suspend u2 by missing two consecutive rounds.
+    // finalize_round tracks defaults and suspends when count >= max_defaults.
+    // Round 0: u1, u3 contribute; u2 defaults (count → 1, no suspension yet)
+    client.contribute(&u1, &token_addr, &100);
+    client.contribute(&u3, &token_addr, &100);
+    env.ledger().set_timestamp(3601);
+    client.finalize_round();
+
+    // Round 1: u1, u3 contribute; u2 defaults again (count → 2 == max_defaults → suspended)
+    client.contribute(&u1, &token_addr, &100);
+    client.contribute(&u3, &token_addr, &100);
+    env.ledger().set_timestamp(7202);
+    client.finalize_round();
+
+    assert!(client.get_member_status(&u2).is_suspended);
+
+    // u2 requests reinstatement — creates proposal_id=1 in Pending status
+    let proposal_id = client.request_reinstatement(
+        &u2,
+        &BytesN::from_array(&env, &[0xABu8; 32]),
+    );
+
+    // Immediately attempt reinstatement while proposal is still Pending → must fail
+    let err = client
+        .try_reinstate_member(&u2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::ProposalNotPending.into());
+
+    // Vote on the proposal before the deadline (u1 + u2 → quorum met with 3 members / 51%)
+    client.vote_on_proposal(&u1, &proposal_id, &true);
+    client.vote_on_proposal(&u2, &proposal_id, &true);
+
+    // Advance past the voting deadline (1 week = 604_800 s)
+    env.ledger().set_timestamp(7202 + 604_801);
+    client.execute_proposal(&proposal_id);
+
+    // Proposal must now be Approved (not Executed, because reinstate_member finishes it)
+    let proposal = client.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Approved);
+
+    // reinstate_member completes the reinstatement
+    client.reinstate_member(&u2);
+
+    // u2 must no longer be suspended
+    assert!(!client.get_member_status(&u2).is_suspended);
+
+    // Second call must fail — ActiveReinstatementProposal mapping is cleared
+    let err2 = client
+        .try_reinstate_member(&u2)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err2, Error::ProposalNotFound.into());
 }
 

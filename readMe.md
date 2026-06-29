@@ -134,3 +134,7 @@ Stellar/Soroban utilizes State Archival to manage network storage footprint. Idl
   ## Community
 
 - [Telegram Group Chat](https://t.me/ahjoor)
+
+## Documentation
+
+- [Contract Error Codes](docs/errors.md) — consolidated reference of every numeric `#[contracterror]` code exposed by the Ahjoor contracts.

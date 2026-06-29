@@ -257,3 +257,7 @@ A: Call `bump_storage()` periodically (recommended every ~30 days of inactivity)
     ## Community
 
 - [Telegram Group Chat](https://t.me/ahjoor)
+
+## Documentation
+
+- [Contract Error Codes](docs/errors.md) — consolidated reference of every numeric `#[contracterror]` code exposed by the Ahjoor contracts.
